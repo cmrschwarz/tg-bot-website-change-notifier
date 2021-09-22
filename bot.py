@@ -202,8 +202,9 @@ def cmd_add(update, context):
     global CONFIG
     url = update.message.text
     try:
-        assert(url[0:5] == "/add ")
-        url = url[5:].strip()
+        cmd = "/add"
+        assert(url[0:4] == cmd)
+        url = url[len(cmd):].strip()
         if len(url) > CONFIG["max_url_len"]:
             reply_to_msg(update.message, True, f'url is too long, refusing to track')
             return
@@ -272,8 +273,31 @@ def cmd_add(update, context):
 
 
 def cmd_remove(update, context):
-    name = update.message.text
-    update.message.reply_text(f'removed url {name}')
+    global DB
+    try:
+        cmd = "/remove"
+        rm_id = update.message.text
+        assert(rm_id[0:len(cmd)] == cmd)
+        rm_id = int(rm_id[len(cmd):].strip())
+    except Exception as ex:
+        update.message.reply_text(f'invalid argument for /remove <id>')
+
+    try:
+        cur = DB.aquire()
+        uid = get_user_id(update.message)
+        res = cur.execute("DELETE FROM notifications WHERE site_id = ? AND user_id = ?", [rm_id, uid]).rowcount
+        if res == 0:
+            DB.release()
+            update.message.reply_text(f'no site with that id present')
+            return
+        res = cur.execute("SELECT COUNT(*) FROM notifications WHERE site_id = ?", [rm_id]).fetchall()
+        if res[0][0] == 0:
+            cur.execute("DELETE FROM sites WHERE id = ?", [rm_id])
+    except Exception as ex:
+        DB.rollback_release()
+        raise ex
+    DB.commit_release()
+    update.message.reply_text(f'site removed', reply_to_message_id=update.message.message_id)
 
 def cmd_mode(update, context):
     name = update.message.text
