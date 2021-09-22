@@ -80,7 +80,7 @@ def get_site_hash(url, diff_mode):
     if diff_mode == DiffMode.RENDER:
         content = imgkit.from_url(url, False)
     else:
-    	content = requests.get(url)
+    	content = requests.get(url).content
     digest = hashlib.sha512(content).digest()
     digest = base64.b64encode(digest).decode("ascii")
     return digest
@@ -130,7 +130,7 @@ def cmd_help(update, context):
             /list               list all currently tracked sites
             /add <url>          add a new site to track
             /remove <id>        remove a site
-            /mode <MODE> <id>   change update detection method for url
+            /mode <mode> <id>   change update detection method for url
 
         MODES:
             render              the diff is based on an image of the site rendered using imgkit
@@ -300,11 +300,121 @@ def cmd_remove(update, context):
     update.message.reply_text(f'site removed', reply_to_message_id=update.message.message_id)
 
 def cmd_mode(update, context):
-    name = update.message.text
-    mode = "html"
-    update.message.reply_text(f'set mode to {mode} for url {name}')
+    global DB
+    try:
+        cmd = "/mode"
+        args = update.message.text
+        assert(args[0:len(cmd)] == cmd)
+        args = args[len(cmd):].lstrip()
+        diff_mode = None
+        for mode in DiffMode:
+            if args[0:len(mode.to_string())].lower() == mode.to_string():
+                diff_mode = mode
+                break
+    except Exception as ex:
+        update.message.reply_text(f'invalid arguments for /mode <mode> <id>')
+        return
+
+    if not diff_mode:
+        reply_to_msg(
+            update.message, True,
+            'unknown mode, see /help for a list of available modes'
+        )
+        return
+
+    try:
+        site_id = int(args[len(diff_mode.to_string()) + 1].strip())
+    except:
+        reply_to_msg(
+            update.message, True,
+            'invalid id, command must have form /mode <MODE> <id>'
+        )
+        return
+
+    cur = DB.aquire()
+    try:
+        uid = get_user_id(update.message)
+        res = cur.execute(
+            "SELECT site_id, user_id, url, mode FROM notifications INNER JOIN sites ON id = site_id WHERE id = ?",
+            [site_id]
+        ).fetchall()
+    except Exception as ex:
+        DB.rollback_release()
+        raise ex
+
+    if res == 0 or (len(res) == 1 and res[0][1] != uid):
+        DB.release()
+        update.message.reply_text(f'no site with that id present')
+        return
+
+    if len(res) == 1 and (res[0][3] == diff_mode.to_int()):
+        update.message.reply_text(f'site is already in this mode', reply_to_message_id=update.message.message_id)
+        return
+
+    url = res[0][2]
+
+    search_for_tgt_site = lambda: (
+        cur.execute(
+            """
+                SELECT id
+                    FROM sites
+                    WHERE url = ? AND mode = ?
+            """,
+            [url, diff_mode.to_int()]
+        ).fetchmany(2)
+    )
+
+    update_query = lambda tgt_site: (
+        cur.execute(
+            "UPDATE notifications SET site_id=? WHERE site_id = ?",
+            [tgt_site, site_id]
+        ).rowcount
+    )
+
+    try:
+        res = search_for_tgt_site()
+        if res:
+            assert(len(res) == 1)
+            res = update_query(res[0][0])
+            assert(res == 1)
+    except Exception as ex:
+        DB.rollback_release()
+        raise ex
+
+    if not res:
+        DB.release()
+        try:
+            hash = get_site_hash(url, diff_mode)
+        except Exception as ex:
+            reply_to_msg(
+                update.message, True,
+                f'error while loading the page, refusing to change mode',
+            )
+            return
+        cur = DB.aquire()
+        try:
+            res = search_for_tgt_site()
+            if res:
+                assert(len(res) == 1)
+                res = update_query(res[0][0])
+                assert(res == 1)
+            else:
+                res = cur.execute("SELECT COUNT(*) FROM notifications WHERE site_id = ?", [site_id]).fetchall()
+                if res[0][0] == 1:
+                    res = cur.execute(
+                        "UPDATE sites SET mode = ? , hash = ? WHERE id = ?",
+                        [diff_mode.to_int(), hash, site_id]
+                    ).rowcount
+                    assert(res == 1)
+                else:
+                    cur.execute("INSERT INTO sites(url, mode, hash) VALUES (?,?,?)", [url, diff_mode.to_int(), hash])
+        except Exception as ex:
+            DB.rollback_release()
+            raise ex
+    DB.commit_release()
 
 
+    update.message.reply_text(f'successfully changed mode', reply_to_message_id=update.message.message_id)
 
 def setup_tg_bot():
     global CONFIG

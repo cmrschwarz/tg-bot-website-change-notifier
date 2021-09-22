@@ -1,3 +1,4 @@
 /.vscode
 /data.sqlite3
+/data.sqlite3-journal
 /config.json
