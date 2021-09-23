@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 from re import match
 from sqlite3 import dbapi2
-from textwrap import dedent
+from textwrap import dedent, indent
 import requests
 import json
 import base64
@@ -15,6 +15,7 @@ import time
 import random
 import sqlite3
 import os
+import sys
 import contextlib
 
 from enum import Enum
@@ -100,6 +101,19 @@ def get_site_hash(url, diff_mode):
         digest = base64.b64encode(digest).decode("ascii")
         return digest
     except Exception as ex:
+        err_msg = str(ex)
+        sys.stderr.write(
+            f"{datetime.datetime.now().isoformat(sep=' ', timespec='seconds')}: failed to load '{url}':\n"
+            + indent(
+                (
+                    "-" * 80 + "\n"
+                    + err_msg
+                    + ("\n" if ((" " + err_msg)[-1]) != "\n" else "")
+                    + "-" * 80 + "\n"
+                ),
+                prefix=" " * 4
+            )
+        )
         return None
 
 def cutoff(txt, rem_len_needed=0):
@@ -252,9 +266,8 @@ def cmd_add(update, context):
     site_added = False
     if not res:
         DB.release()
-        try:
-            hash = get_site_hash(url, diff_mode)
-        except Exception as ex:
+        hash = get_site_hash(url, diff_mode)
+        if not hash:
             reply_to_msg(
                 update.message, True,
                 f'error while loading the page, refusing to track this url',
@@ -404,14 +417,12 @@ def cmd_mode(update, context):
 
     if not res:
         DB.release()
-        try:
-            hash = get_site_hash(url, diff_mode)
-        except Exception as ex:
+        hash = get_site_hash(url, diff_mode)
+        if not hash:
             reply_to_msg(
                 update.message, True,
                 f'error while loading the page, refusing to change mode',
             )
-            return
         cur = DB.aquire()
         try:
             res = search_for_tgt_site()
