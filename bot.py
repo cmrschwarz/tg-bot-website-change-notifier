@@ -114,31 +114,25 @@ def reply_to_msg(message, explicit_reply, txt):
 
 def random_seed():
     return random.randint(0, 2**31)
+
 def get_user_id(message):
     global DB
-    tg_chat_id = message.chat.id
-    if message.from_user:
-        tg_id = message.from_user.id
-        col_name = "tg_user_id"
-        tg_user_id = tg_id
-    else:
-        tg_id = tg_chat_id
-        col_name = "tg_chat_id"
-        tg_user_id = None
+    chat_id = message.chat.id
+    is_group = (message.from_user is None)
 
     cur = DB.aquire()
     try:
         select_query = lambda: cur.execute(
-            f"SELECT id FROM users WHERE {col_name} = ?",
-            [tg_id]
-        ).fetchmany(2)
+            "SELECT id FROM users WHERE tg_chat_id = ?",
+            [chat_id]
+        ).fetchone()
         res = select_query()
         if res:
             DB.release()
         else:
             cur.execute(
-                "INSERT INTO users (tg_user_id, tg_chat_id) VALUES (?,?)",
-                [tg_user_id, tg_chat_id]
+                "INSERT INTO users (tg_chat_id, is_group) VALUES (?,?)",
+                [chat_id, is_group]
             )
             res = select_query()
             DB.commit_release()
@@ -146,8 +140,7 @@ def get_user_id(message):
         DB.rollback_release()
         raise ex
 
-    assert(len(res) == 1)
-    return res[0][0]
+    return res[0]
 
 
 def cmd_help(update, context):
@@ -190,7 +183,7 @@ def cmd_list(update, context):
         raise ex
 
     if not sites:
-        update.message.reply_text("currently not tracking any sites", reply_to_message_id=update.message.id)
+        update.message.reply_text("currently not tracking any sites", reply_to_message_id=update.message.message_id)
         return
 
     sites_by_mode = {}
@@ -465,8 +458,8 @@ def setup_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER NOT NULL PRIMARY KEY,
-            tg_user_id INTEGER UNIQUE,
-            tg_chat_id INTEGER UNIQUE
+            tg_chat_id INTEGER NOT NULL UNIQUE,
+            is_group BOOLEAN
         );
     """)
     cur.execute("""
