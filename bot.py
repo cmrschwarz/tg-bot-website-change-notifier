@@ -1,16 +1,21 @@
 #!/usr/bin/python3
+from re import match
 from sqlite3 import dbapi2
 from textwrap import dedent
 import requests
 import json
 import base64
 import hashlib
-import time
+import datetime
 import threading
 import telegram
 import imgkit
 import urllib
+import time
+import random
 import sqlite3
+import os
+import contextlib
 
 from enum import Enum
 from telegram import (MessageEntity, ParseMode, InlineKeyboardButton)
@@ -40,6 +45,7 @@ class DiffMode(Enum):
 
 class Database:
     def __init__(self, url):
+        self.url = url
         self.db = sqlite3.connect(url, check_same_thread=False)
         self.lock = threading.RLock()
         self.count = 0
@@ -75,15 +81,25 @@ class Database:
 
 global DB
 global CONFIG
+global BOT
+global STDIO_SUPPRESSION_FILE
 
 def get_site_hash(url, diff_mode):
-    if diff_mode == DiffMode.RENDER:
-        content = imgkit.from_url(url, False)
-    else:
-    	content = requests.get(url).content
-    digest = hashlib.sha512(content).digest()
-    digest = base64.b64encode(digest).decode("ascii")
-    return digest
+    global STDIO_SUPPRESSION_FILE
+    try:
+        if diff_mode == DiffMode.RENDER:
+            # suppress uselesss 'Rendering...' etc. console output
+            # from imgkit
+            with contextlib.redirect_stdout(STDIO_SUPPRESSION_FILE):
+                content = imgkit.from_url(url, False)
+        else:
+            assert(diff_mode == DiffMode.HTML)
+            content = requests.get(url).content
+        digest = hashlib.sha512(content).digest()
+        digest = base64.b64encode(digest).decode("ascii")
+        return digest
+    except Exception as ex:
+        return None
 
 def cutoff(txt, rem_len_needed=0):
     txt_len = len(txt)
@@ -96,23 +112,34 @@ def cutoff(txt, rem_len_needed=0):
 def reply_to_msg(message, explicit_reply, txt):
     message.reply_text(cutoff(txt), reply_to_message_id=message.message_id if explicit_reply else None)
 
+def random_seed():
+    return random.randint(0, 2**31)
 def get_user_id(message):
     global DB
+    tg_chat_id = message.chat.id
     if message.from_user:
         tg_id = message.from_user.id
         col_name = "tg_user_id"
+        tg_user_id = tg_id
     else:
-        tg_id = message.chat.id
+        tg_id = tg_chat_id
         col_name = "tg_chat_id"
+        tg_user_id = None
 
     cur = DB.aquire()
     try:
-        select_query = lambda: cur.execute(f"SELECT id FROM users WHERE {col_name} = ?", [tg_id]).fetchmany(2)
+        select_query = lambda: cur.execute(
+            f"SELECT id FROM users WHERE {col_name} = ?",
+            [tg_id]
+        ).fetchmany(2)
         res = select_query()
         if res:
             DB.release()
         else:
-            cur.execute(f"INSERT INTO users ({col_name}) VALUES (?)", [tg_id])
+            cur.execute(
+                "INSERT INTO users (tg_user_id, tg_chat_id) VALUES (?,?)",
+                [tg_user_id, tg_chat_id]
+            )
             res = select_query()
             DB.commit_release()
     except Exception as ex:
@@ -243,7 +270,7 @@ def cmd_add(update, context):
         try:
             res = select_query()
             if not res:
-                cur.execute("INSERT INTO sites (url, mode, hash) VALUES (?, ?, ?)", [url, diff_mode.to_int(), hash])
+                cur.execute("INSERT INTO sites (url, mode, hash, seed) VALUES (?, ?, ?, ?)", [url, diff_mode.to_int(), hash, random_seed()])
                 site_added = True
                 res = select_query()
         except Exception as ex:
@@ -407,7 +434,7 @@ def cmd_mode(update, context):
                     ).rowcount
                     assert(res == 1)
                 else:
-                    cur.execute("INSERT INTO sites(url, mode, hash) VALUES (?,?,?)", [url, diff_mode.to_int(), hash])
+                    cur.execute("INSERT INTO sites(url, mode, hash, seed) VALUES (?,?,?,?)", [url, diff_mode.to_int(), hash, random_seed()])
         except Exception as ex:
             DB.rollback_release()
             raise ex
@@ -418,9 +445,10 @@ def cmd_mode(update, context):
 
 def setup_tg_bot():
     global CONFIG
-    updater = Updater(CONFIG["bot_token"], use_context=True)
+    global BOT
+    BOT = Updater(CONFIG["bot_token"], use_context=True)
 
-    dp = updater.dispatcher
+    dp = BOT.dispatcher
 
     dp.add_handler(CommandHandler('help', cmd_help))
     dp.add_handler(CommandHandler('list', cmd_list))
@@ -428,7 +456,7 @@ def setup_tg_bot():
     dp.add_handler(CommandHandler('remove', cmd_remove))
     dp.add_handler(CommandHandler('mode', cmd_mode))
 
-    updater.start_polling()
+    BOT.start_polling()
 
 def setup_db():
     global DB
@@ -446,7 +474,8 @@ def setup_db():
             id INTEGER NOT NULL PRIMARY KEY,
             url TEXT NOT NULL,
             mode INTEGER NOT NULL,
-            hash TEXT NOT NULL
+            hash TEXT,
+            seed INTEGER NOT NULL
         );
     """)
     cur.execute("""
@@ -460,10 +489,101 @@ def setup_db():
     """)
     DB.commit_release()
 
+def inform_site_changed(db_cur, site_id, mode, new_hash):
+    global BOT
+    db_cur.execute("""
+        SELECT tg_chat_id, url
+            FROM notifications
+            INNER JOIN sites ON notifications.site_id = sites.id
+            INNER JOIN users ON notifications.user_id = users.id
+            WHERE sites.id = ?
+        """,
+        [site_id]
+    )
+    while True:
+        res = db_cur.fetchone()
+        if not res: break
+        tg_chat_id, url = res
+        if new_hash:
+            msg = cutoff("site changed:\n" + url)
+        else:
+            msg = cutoff("site became unavailable:\n" + url)
+        BOT.bot.send_message(tg_chat_id, msg)
+
+def poll_sites():
+    global CONFIG
+    update_interval_secs = CONFIG["update_interval_seconds"]
+
+    global DB
+    # we use a separate connection for this so we don't stall the bot interaction while
+    # our updates are running
+    db = sqlite3.connect(DB.url)
+    cur = db.cursor()
+    notif_cur = db.cursor()
+
+    last_poll = datetime.datetime.min
+    last_seed = 0
+    match_or = False
+    while True:
+        now = datetime.datetime.now()
+        diff = now - last_poll
+        last_poll = now
+        secs_since_last = diff.total_seconds()
+        if secs_since_last > update_interval_secs:
+            seed_gte = 0
+            seed_lte = update_interval_secs
+            last_seed = 0
+        else:
+            seed_gte = last_seed + 1
+            seed_lte = (last_seed + secs_since_last) % update_interval_secs
+            if seed_lte < last_seed:
+                match_or = True
+            last_seed = seed_lte
+        query = cur.execute(
+            f"""
+                SELECT id, url, mode, hash
+                    FROM sites
+                    WHERE (seed % ?) <= ? {"OR" if match_or else "AND"} (seed % ?) >= ?
+            """,
+            [update_interval_secs, seed_lte, update_interval_secs, seed_gte]
+        )
+        while True:
+            res = query.fetchone()
+            if not res: break
+            site_id, url, mode, hash = res
+            mode = DiffMode.from_int(mode)
+            new_hash = get_site_hash(url, mode)
+            if hash == new_hash: continue
+            notif_cur.execute("UPDATE sites SET hash = ? WHERE id = ?", [new_hash, site_id])
+            db.commit()
+            inform_site_changed(notif_cur, site_id, mode, new_hash)
+
+        next_ts = cur.execute(
+            """
+                SELECT seed, (seed - ?) % ? AS next_id
+                    FROM sites
+                    ORDER BY next_id ASC
+                    LIMIT 1
+            """,
+            [last_seed, update_interval_secs]
+        ).fetchone()
+        if not next_ts:
+            time.sleep(update_interval_secs)
+        else:
+            next_seed = next_ts[0] % update_interval_secs
+            if next_seed < last_seed:
+                time.sleep(update_interval_secs - last_seed + next_seed)
+            else:
+                time.sleep(next_seed - last_seed)
+
+
+
+
 if __name__ == '__main__':
     with open("config.json", "r") as f:
 	    CONFIG = json.load(f)
+    STDIO_SUPPRESSION_FILE = open(os.devnull, "w")
     setup_db()
     setup_tg_bot()
-    time.sleep(3600)
+    poll_sites()
 
