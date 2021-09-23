@@ -8,7 +8,7 @@ import base64
 import hashlib
 import datetime
 import threading
-import telegram
+import telegram #pip3 install python-telegram-bot
 import imgkit
 import urllib
 import time
@@ -82,6 +82,7 @@ class Database:
 global DB
 global CONFIG
 global BOT
+global SCRIPT_DIR_PATH
 global STDIO_SUPPRESSION_FILE
 
 def get_site_hash(url, diff_mode):
@@ -453,7 +454,8 @@ def setup_tg_bot():
 
 def setup_db():
     global DB
-    DB = Database("data.sqlite3")
+    global SCRIPT_DIR_PATH
+    DB = Database(SCRIPT_DIR_PATH + "/data.sqlite3")
     cur = DB.aquire()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -573,8 +575,9 @@ def poll_sites():
 
 
 if __name__ == '__main__':
-    with open("config.json", "r") as f:
-	    CONFIG = json.load(f)
+    SCRIPT_DIR_PATH = os.path.dirname(os.path.realpath(__file__))
+    with open(SCRIPT_DIR_PATH + "/config.json", "r") as f:
+        CONFIG = json.load(f)
     STDIO_SUPPRESSION_FILE = open(os.devnull, "w")
     setup_db()
     setup_tg_bot()
