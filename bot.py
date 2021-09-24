@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+from math import ceil
 from re import match
 from sqlite3 import dbapi2
 from textwrap import dedent, indent
@@ -52,11 +53,12 @@ class Database:
         self.count = 0
         self.commit = False
         self.rollback = False
-        self.cursor = self.db.cursor()
 
     def aquire(self):
         self.lock.acquire()
         self.count += 1
+        if self.count == 1:
+            self.cursor = self.db.cursor()
         return self.cursor
 
     def release(self):
@@ -69,6 +71,7 @@ class Database:
             elif self.commit:
                 self.db.commit()
                 self.commit = False
+            self.cursor.close()
         self.lock.release()
 
     def commit_release(self):
@@ -397,7 +400,7 @@ def cmd_mode(update, context):
             [url, diff_mode.to_int()]
         ).fetchmany(2)
     )
-
+    #TODO: if this mode is already tracked, remove the duplicate tracking
     update_query = lambda tgt_site: (
         cur.execute(
             "UPDATE notifications SET site_id=? WHERE site_id = ?",
@@ -518,69 +521,57 @@ def inform_site_changed(db_cur, site_id, mode, new_hash):
 
 def poll_sites():
     global CONFIG
-    update_interval_secs = CONFIG["update_interval_seconds"]
-
+    update_interval_secs = float(CONFIG["update_interval_seconds"])
     global DB
     # we use a separate connection for this so we don't stall the bot interaction while
     # our updates are running
     db = sqlite3.connect(DB.url)
-    cur = db.cursor()
-    notif_cur = db.cursor()
-
-    last_poll = datetime.datetime.min
-    last_seed = 0
-    match_or = False
+    last_poll = datetime.datetime.now()
+    curr_seed = 0
     while True:
         now = datetime.datetime.now()
         diff = now - last_poll
         last_poll = now
         secs_since_last = diff.total_seconds()
-        if secs_since_last > update_interval_secs:
-            seed_gte = 0
-            seed_lte = update_interval_secs
-            last_seed = 0
-        else:
-            seed_gte = last_seed + 1
-            seed_lte = (last_seed + secs_since_last) % update_interval_secs
-            if seed_lte < last_seed:
-                match_or = True
-            last_seed = seed_lte
+        cur = db.cursor()
         query = cur.execute(
             f"""
-                SELECT id, url, mode, hash
+                SELECT id, url, mode, hash, seed, ((seed - ?) % ? + ?) % ? AS delay
                     FROM sites
-                    WHERE (seed % ?) <= ? {"OR" if match_or else "AND"} (seed % ?) >= ?
+                    WHERE delay < ?
+                    ORDER BY delay ASC
             """,
-            [update_interval_secs, seed_lte, update_interval_secs, seed_gte]
+            [curr_seed, update_interval_secs, update_interval_secs,  update_interval_secs, secs_since_last]
         )
         while True:
             res = query.fetchone()
             if not res: break
-            site_id, url, mode, hash = res
+            site_id, url, mode, hash, seed, delay = res
             mode = DiffMode.from_int(mode)
             new_hash = get_site_hash(url, mode)
             if hash == new_hash: continue
+            notif_cur = db.cursor()
             notif_cur.execute("UPDATE sites SET hash = ? WHERE id = ?", [new_hash, site_id])
             db.commit()
             inform_site_changed(notif_cur, site_id, mode, new_hash)
+            notif_cur.close()
 
-        next_ts = cur.execute(
-            """
-                SELECT seed, (seed - ?) % ? AS next_id
+        curr_seed = (curr_seed + secs_since_last) % update_interval_secs
+        delay_to_next = cur.execute(
+            f"""
+                SELECT mod(mod(seed - ?, ?) + ?, ?) AS delay
                     FROM sites
-                    ORDER BY next_id ASC
+                    ORDER BY delay ASC
                     LIMIT 1
             """,
-            [last_seed, update_interval_secs]
+            [curr_seed, update_interval_secs, update_interval_secs,  update_interval_secs]
         ).fetchone()
-        if not next_ts:
-            time.sleep(update_interval_secs)
+        if not delay_to_next:
+            time.sleep(update_interval_secs * (random.random() * 0.9 + 0.1))
         else:
-            next_seed = next_ts[0] % update_interval_secs
-            if next_seed < last_seed:
-                time.sleep(update_interval_secs - last_seed + next_seed)
-            else:
-                time.sleep(next_seed - last_seed)
+            delay = max(delay_to_next[0], 1)
+            time.sleep(delay)
+        cur.close()
 
 
 
