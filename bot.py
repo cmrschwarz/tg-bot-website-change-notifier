@@ -334,7 +334,24 @@ def cmd_remove(update, context):
         DB.rollback_release()
         raise ex
     DB.commit_release()
-    update.message.reply_text(f'site removed', reply_to_message_id=update.message.message_id)
+    reply_to_msg(update.message, True, f'site removed')
+
+def update_notification_site(message, cursor, user_id, site_id_old, site_id_new, mode_new):
+    res = cursor.execute(
+        "SELECT site_id FROM notifications WHERE site_id = ? AND user_id = ?",
+        [site_id_new, user_id]
+    ).fetchone()
+    if res:
+        reply_to_msg(
+            message, True,
+            f'already tracking this url in {mode_new.to_string()} mode with id {res[0]}',
+        )
+        return False
+    cursor.execute(
+        "UPDATE notifications SET site_id = ? WHERE site_id = ? AND user_id = ?",
+        [site_id_new, site_id_old]
+    ).rowcount
+    return True
 
 def cmd_mode(update, context):
     global DB
@@ -349,13 +366,13 @@ def cmd_mode(update, context):
                 diff_mode = mode
                 break
     except Exception as ex:
-        update.message.reply_text(f'invalid arguments for /mode <mode> <id>')
+        reply_to_msg(update.message, True, 'invalid argument for mode, command must have the form /mode <MODE> <id>')
         return
 
     if not diff_mode:
         reply_to_msg(
             update.message, True,
-            'unknown mode, see /help for a list of available modes'
+            f"unknown mode '{args.split()[0]}', see /help for a list of available modes"
         )
         return
 
@@ -364,7 +381,7 @@ def cmd_mode(update, context):
     except:
         reply_to_msg(
             update.message, True,
-            'invalid id, command must have form /mode <MODE> <id>'
+            'invalid argument for id, command must have the form /mode <MODE> <id>'
         )
         return
 
@@ -372,48 +389,34 @@ def cmd_mode(update, context):
     try:
         uid = get_user_id(update.message)
         res = cur.execute(
-            "SELECT site_id, user_id, url, mode FROM notifications INNER JOIN sites ON id = site_id WHERE id = ?",
-            [site_id]
-        ).fetchall()
+            "SELECT site_id, url, mode FROM notifications INNER JOIN sites ON id = site_id WHERE site_id = ? AND user_id = ?",
+            [site_id, uid]
+        ).fetchone()
     except Exception as ex:
-        DB.rollback_release()
+        DB.release()
         raise ex
 
-    if res == 0 or (len(res) == 1 and res[0][1] != uid):
+    if not res:
         DB.release()
         update.message.reply_text(f'no site with that id present')
         return
 
-    if len(res) == 1 and (res[0][3] == diff_mode.to_int()):
+    site_id, url, mode = res
+    if mode == diff_mode.to_int():
         update.message.reply_text(f'site is already in this mode', reply_to_message_id=update.message.message_id)
         return
 
-    url = res[0][2]
-
     search_for_tgt_site = lambda: (
         cur.execute(
-            """
-                SELECT id
-                    FROM sites
-                    WHERE url = ? AND mode = ?
-            """,
+            "SELECT id FROM sites WHERE url = ? AND mode = ?",
             [url, diff_mode.to_int()]
-        ).fetchmany(2)
-    )
-    #TODO: if this mode is already tracked, remove the duplicate tracking
-    update_query = lambda tgt_site: (
-        cur.execute(
-            "UPDATE notifications SET site_id=? WHERE site_id = ?",
-            [tgt_site, site_id]
-        ).rowcount
+        ).fetchone()
     )
 
     try:
         res = search_for_tgt_site()
         if res:
-            assert(len(res) == 1)
-            res = update_query(res[0][0])
-            assert(res == 1)
+            if not update_notification_site(update.message, cur, uid, site_id, res[0], diff_mode): return
     except Exception as ex:
         DB.rollback_release()
         raise ex
@@ -426,23 +429,31 @@ def cmd_mode(update, context):
                 update.message, True,
                 f'error while loading the page, refusing to change mode',
             )
+            return
         cur = DB.aquire()
         try:
             res = search_for_tgt_site()
             if res:
-                assert(len(res) == 1)
-                res = update_query(res[0][0])
-                assert(res == 1)
+                if not update_notification_site(update.message, cur, uid, site_id, res[0], diff_mode): return
             else:
-                res = cur.execute("SELECT COUNT(*) FROM notifications WHERE site_id = ?", [site_id]).fetchall()
-                if res[0][0] == 1:
+                res = cur.execute("SELECT COUNT(*) FROM notifications WHERE site_id = ?", [site_id]).fetchone()
+                if res[0] == 1:
                     res = cur.execute(
                         "UPDATE sites SET mode = ? , hash = ? WHERE id = ?",
                         [diff_mode.to_int(), hash, site_id]
                     ).rowcount
                     assert(res == 1)
                 else:
-                    cur.execute("INSERT INTO sites(url, mode, hash, seed) VALUES (?,?,?,?)", [url, diff_mode.to_int(), hash, random_seed()])
+                    cur.execute(
+                        "INSERT INTO sites(url, mode, hash, seed) VALUES (?,?,?,?)",
+                        [url, diff_mode.to_int(), hash, random_seed()]
+                    )
+                    res = search_for_tgt_site()
+                    assert(res)
+                    cur.execute(
+                        "UPDATE notifications SET site_id = ? WHERE site_id = ? AND user_id = ?",
+                        [res[0], site_id, uid]
+                    ).rowcount
         except Exception as ex:
             DB.rollback_release()
             raise ex
