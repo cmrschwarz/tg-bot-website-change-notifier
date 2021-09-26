@@ -127,8 +127,12 @@ def cutoff(txt, rem_len_needed=0):
     if max_txt_len < 0: return ""
     return "....."[0:max_txt_len]
 
-def reply_to_msg(message, explicit_reply, txt):
-    message.reply_text(cutoff(txt), reply_to_message_id=message.message_id if explicit_reply else None)
+def reply_to_msg(message, explicit_reply, txt, monospaced=False):
+    entities = None
+    txt = cutoff(txt)
+    if monospaced:
+        entities=[MessageEntity(MessageEntity.CODE, 0, len(txt))]
+    message.reply_text(txt, reply_to_message_id=message.message_id if explicit_reply else None, entities=entities)
 
 def random_seed():
     return random.randint(0, 2**31)
@@ -175,11 +179,7 @@ def cmd_help(update, context):
             html                the diff is based on the raw html of the site (default)
 
     """)
-    update.message.reply_text(
-        text,
-        entities=[MessageEntity(MessageEntity.CODE, 0, len(text))],
-        reply_to_message_id=update.message.message_id
-    )
+    reply_to_msg(update.message, True, text, monospaced=True)
 
 
 def cmd_list(update, context):
@@ -201,7 +201,7 @@ def cmd_list(update, context):
         raise ex
 
     if not sites:
-        update.message.reply_text("currently not tracking any sites", reply_to_message_id=update.message.message_id)
+        reply_to_msg(update.message, True, "currently not tracking any sites")
         return
 
     sites_by_mode = {}
@@ -214,7 +214,7 @@ def cmd_list(update, context):
         else:
             sites_by_mode[mode].append((id, url))
 
-    reply_to_msg_id = update.message.message_id
+    explicit_reply = True
     sitelist = ""
     for mode, sites in sites_by_mode.items():
         sitelist += mode.to_string() + " mode:\n"
@@ -222,17 +222,13 @@ def cmd_list(update, context):
             line = f"    {' ' * (longest_id - len(id)) + id}: {cutoff(url, longest_id + 7)}\n"
             line_len = len(line)
             if len(sitelist) + line_len > telegram.MAX_MESSAGE_LENGTH:
-                update.message.reply_text(sitelist, entities=[MessageEntity(MessageEntity.CODE, 0, len(sitelist))])
-                reply_to_msg_id = None
+                reply_to_msg(update.message, False, sitelist, monospaced=True)
+                explicit_reply = False
                 sitelist = line
             else:
                 sitelist +=  line
     if sitelist != "":
-        update.message.reply_text(
-            sitelist,
-            reply_to_message_id=reply_to_msg_id,
-            entities=[MessageEntity(MessageEntity.CODE, 0, len(sitelist))]
-        )
+        reply_to_msg(update.message, explicit_reply, sitelist, monospaced=True)
 
 
 def cmd_add(update, context):
@@ -317,7 +313,7 @@ def cmd_remove(update, context):
         assert(rm_id[0:len(cmd)] == cmd)
         rm_id = int(rm_id[len(cmd):].strip())
     except Exception as ex:
-        update.message.reply_text(f'invalid argument for /remove <id>')
+        reply_to_msg(update.message, True, f'invalid argument for /remove <id>')
 
     try:
         cur = DB.aquire()
@@ -325,7 +321,7 @@ def cmd_remove(update, context):
         res = cur.execute("DELETE FROM notifications WHERE site_id = ? AND user_id = ?", [rm_id, uid]).rowcount
         if res == 0:
             DB.release()
-            update.message.reply_text(f'no site with that id present')
+            reply_to_msg(update.message, True, f'no site with that id present')
             return
         res = cur.execute("SELECT COUNT(*) FROM notifications WHERE site_id = ?", [rm_id]).fetchall()
         if res[0][0] == 0:
@@ -398,12 +394,12 @@ def cmd_mode(update, context):
 
     if not res:
         DB.release()
-        update.message.reply_text(f'no site with that id present')
+        reply_to_msg(update.message, True, f'no site with that id present')
         return
 
     site_id, url, mode = res
     if mode == diff_mode.to_int():
-        update.message.reply_text(f'site is already in this mode', reply_to_message_id=update.message.message_id)
+        reply_to_msg(update.message, True, f'site is already in this mode')
         return
 
     search_for_tgt_site = lambda: (
@@ -460,7 +456,7 @@ def cmd_mode(update, context):
     DB.commit_release()
 
 
-    update.message.reply_text(f'successfully changed mode', reply_to_message_id=update.message.message_id)
+    reply_to_msg(update.message, True, f'successfully changed mode')
 
 def setup_tg_bot():
     global CONFIG
