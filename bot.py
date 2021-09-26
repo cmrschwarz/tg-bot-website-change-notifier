@@ -17,6 +17,7 @@ import random
 import sqlite3
 import os
 import sys
+from url_normalize import url_normalize
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
 
@@ -349,10 +350,10 @@ def cmd_add(update, context):
         cmd = "/add"
         assert(url[0:4] == cmd)
         url = url[len(cmd):].strip()
+        url = url_normalize(url)
         if len(url) > MAX_URL_LEN:
             reply_to_msg(update.message, True, f'url is too long (limit is set to {MAX_URL_LEN}), refusing to track')
             return
-        parsed = urllib.parse.urlparse(url)
     except Exception as e:
         reply_to_msg(update.message, True, f'failed to parse url')
         return
