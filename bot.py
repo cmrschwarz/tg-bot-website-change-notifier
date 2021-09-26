@@ -15,6 +15,7 @@ import urllib
 import time
 import random
 import sqlite3
+import math
 import os
 import sys
 from url_normalize import url_normalize
@@ -91,8 +92,10 @@ global CONFIG
 global BOT
 global SCRIPT_DIR_PATH
 global STDIO_SUPPRESSION_FILE
+
+INT_MAX = 2**31 - 1
 # the maximum number of characters before the url in /list
-MAX_URL_PREFIX_LEN = 4 + len(str((2**32))) + 1 + 1 # 4 spaces + id name + colon + space
+MAX_URL_PREFIX_LEN = 4 + len(str((INT_MAX))) + 1 + 1 # 4 spaces + id name + colon + space
 # this limit ensures that each line in /list is a clickable url
 MAX_URL_LEN = telegram.MAX_MESSAGE_LENGTH - MAX_URL_PREFIX_LEN
 
@@ -194,7 +197,7 @@ def reply_to_msg(message, explicit_reply, txt, monospaced=False, extra_entities=
     message.reply_text(txt_co, reply_to_message_id=reply_to_message_id, entities=entities, disable_web_page_preview=disable_web_page_preview)
 
 def random_seed():
-    return random.randint(0, 2**31)
+    return random.randint(0, INT_MAX)
 
 def get_user_id(message):
     global DB
@@ -226,30 +229,50 @@ def get_user_id(message):
 def cmd_start(update, context):
     reply_to_msg(update.message, True, "Hello! Please use /help for a list of commands.")
 
+def pad(str, length, pad_char=" "):
+    assert(length > len(str) and len(pad_char) == 1)
+    return str + pad_char * (length - len(str))
+
 def cmd_help(update, context):
     global DEFAULT_DIFF_MODE
     global UPDATE_INTERVAL_SECONDS
     global MAX_SITES_PER_USER
     global MAX_URL_LEN
+    global UPDATE_FREQUENCIES
     default_tag = lambda mode: "(default)" if (mode == DEFAULT_DIFF_MODE) else ""
-    text = dedent(f"""\
+
+    first_column_width = 33
+    frequency_listing = ""
+
+
+    for (name, freq) in UPDATE_FREQUENCIES.items():
+        frequency_listing += pad(" " * 4 + f"{name} ", first_column_width) + f"{freq} s\n"
+
+    text = f"""\
         COMMANDS:
-            /help               print this menu
-            /list               list all currently tracked sites and their ids
-            /add <url>          add a new site to track
-            /remove <id>        remove a site
-            /mode <id> <mode>   change the update detection method for a site
+            /help                        print this menu
+            /list                        list all currently tracked sites and their ids
+            /add <url>                   add a new site to track
+            /remove <id>                 remove a site
+            /mode <id> <mode>            change the update detection method for a site
+            /frequency <id> <frequency>  change the update frequency for a site
 
         MODES:
-            render              the diff is based on an image of the site rendered using imgkit {default_tag(DiffMode.RENDER)}
-            html                the diff is based on the raw html of the site {default_tag(DiffMode.HTML)}
+            render                       the diff is based on an image of the site rendered using imgkit {default_tag(DiffMode.RENDER)}
+            html                         the diff is based on the raw html of the site {default_tag(DiffMode.HTML)}
+
+        FREQUENCIES:
 
         INSTANCE SETTINGS
-            update interval     {UPDATE_INTERVAL_SECONDS} seconds
-            max sites per user  {MAX_SITES_PER_USER}
-            max url length      {MAX_URL_LEN}
+            update interval              {UPDATE_INTERVAL_SECONDS} seconds
+            max sites per user           {MAX_SITES_PER_USER}
+            max url length               {MAX_URL_LEN}
 
-    """)
+    """
+    text = dedent(text)
+    freq_str = "FREQUENCIES:\n"
+    freq_str_end_pos = text.find(freq_str) + len(freq_str)
+    text = text[:freq_str_end_pos] + frequency_listing + text[freq_str_end_pos:]
     reply_to_msg(update.message, True, text, monospaced=True)
 
 
@@ -259,7 +282,7 @@ def cmd_list(update, context):
         uid = get_user_id(update.message)
         sites = cur.execute(
             """
-                SELECT id, url, mode
+                SELECT id, url, mode, frequency
                     FROM sites
                     INNER JOIN notifications ON sites.id = notifications.site_id
                     WHERE notifications.user_id = ?
@@ -275,15 +298,16 @@ def cmd_list(update, context):
         reply_to_msg(update.message, True, "currently not tracking any sites")
         return
 
-    sites_by_mode = {}
+    sites_by_type = {}
     longest_id = 0
     for site in sites:
-        id, url, mode = str(site[0]), site[1], DiffMode.from_int(site[2])
+        id, url, mode, freq = str(site[0]), site[1], DiffMode.from_int(site[2]), UPDATE_FREQUENCY_NAMES[site[3]]
         longest_id = max(longest_id, len(id))
-        if mode not in sites_by_mode:
-            sites_by_mode[mode] = [(id, url)]
+        type = (mode, freq)
+        if type not in sites_by_type:
+            sites_by_type[type] = [(id, url)]
         else:
-            sites_by_mode[mode].append((id, url))
+            sites_by_type[type].append((id, url))
 
     single_reply = True
     sitelist = ""
@@ -292,7 +316,7 @@ def cmd_list(update, context):
     entity_ends = []
     entities = []
     line_prefix_len = 4 + longest_id + 1 + 1 # 4 spaces + longest_id + colon + space
-    for mode, sites in sites_by_mode.items():
+    for (mode, freq), sites in sites_by_type.items():
         if not single_reply:
             reply_to_msg(update.message, False, sitelist, monospaced=True, extra_entities=entities)
             mode_ends = []
@@ -306,7 +330,7 @@ def cmd_list(update, context):
                 sitelist += "\n"
                 mode_ends.append(len(sitelist))
                 entity_ends.append(len(entities))
-        sitelist += mode.to_string() + " mode:\n"
+        sitelist += mode.to_string() + " mode [" + freq + "]:\n"
         for id, url in sites:
             line = f"    {' ' * (longest_id - len(id)) + id}: {url}\n"
             entities.append(MessageEntity(MessageEntity.URL, len(sitelist) + line_prefix_len, len(line) - line_prefix_len))
@@ -353,6 +377,7 @@ def cmd_add(update, context):
     global MAX_URL_LEN
     global DEFAULT_DIFF_MODE
     global MAX_SITES_PER_USER
+    global DEFAULT_UPDATE_FREQUENCY
     url = update.message.text
     try:
         cmd = "/add"
@@ -400,7 +425,10 @@ def cmd_add(update, context):
         try:
             res = select_query()
             if not res:
-                cur.execute("INSERT INTO sites (url, mode, hash, seed) VALUES (?, ?, ?, ?)", [url, DEFAULT_DIFF_MODE.to_int(), hash, random_seed()])
+                cur.execute(
+                    "INSERT INTO sites (url, mode, frequency, hash, seed) VALUES (?, ?, ?, ?, ?)",
+                    [url, DEFAULT_DIFF_MODE.to_int(), DEFAULT_UPDATE_FREQUENCY, hash, random_seed()]
+                )
                 site_added = True
                 res = select_query()
         except Exception as ex:
@@ -607,6 +635,7 @@ def setup_db():
             id INTEGER NOT NULL PRIMARY KEY,
             url TEXT NOT NULL,
             mode INTEGER NOT NULL,
+            frequency INTEGER NOT NULL,
             hash TEXT,
             seed INTEGER NOT NULL
         );
@@ -621,6 +650,15 @@ def setup_db():
         ) WITHOUT ROWID;
     """)
     DB.commit_release()
+
+    # make sure the db doesn't contain frequencies that are not specified by the config
+    cur = DB.aquire()
+    frequency_check = cur.execute(
+        f"SELECT COUNT(*) from sites WHERE frequency NOT IN ({','.join(['?'] * len(UPDATE_FREQUENCIES))})",
+        list(UPDATE_FREQUENCIES.values())
+    ).fetchone()
+    DB.release()
+    assert(frequency_check[0] == 0)
 
 def inform_site_changed(site_id, mode, new_hash):
     global DB
@@ -661,7 +699,8 @@ def poll_sites():
     global DB
     global NUM_WORKER_THREADS
     global UPDATE_INTERVAL_SECONDS
-    ui = UPDATE_INTERVAL_SECONDS
+    global TIMESTEP
+    smallest_frequency = min(UPDATE_FREQUENCIES.values())
     thread_pool = ThreadPoolExecutor(NUM_WORKER_THREADS)
     last_poll = datetime.datetime.now()
     curr_seed = 0
@@ -673,12 +712,12 @@ def poll_sites():
         cur = DB.aquire()
         query = cur.execute(
             f"""
-                SELECT id, url, mode, hash, ((seed - ?) % ? + ?) % ? AS delay
+                SELECT id, url, mode, hash, ((seed - ?) % frequency + frequency) % frequency AS delay
                     FROM sites
                     WHERE delay < ?
                     ORDER BY delay ASC
             """,
-            [curr_seed, ui, ui, ui, secs_since_last]
+            [curr_seed, secs_since_last]
         )
         while True:
             res = query.fetchone()
@@ -686,26 +725,24 @@ def poll_sites():
             site_id, url, mode, hash, _delay = res
             mode = DiffMode.from_int(mode)
             thread_pool.submit(poll_site, site_id, url, mode, hash)
-        curr_seed = (curr_seed + secs_since_last) % ui
+        curr_seed = (curr_seed + secs_since_last) % TIMESTEP
         # more compact would be mod(mod(seed - curr_seed, update_interval_secs) + update_interval_secs, update_interval_secs)
         # but not all instances of sqlite3 support the mod function
         delay_to_next = cur.execute(
             f"""
-                SELECT (CAST(seed - ? AS INTEGER) % ? + ?) % ? + ABS((seed - ?) - CAST(seed - ? AS INTEGER)) AS delay
+                SELECT (CAST(seed - ? AS INTEGER) % frequency + frequency) % frequency + ABS((seed - ?) - CAST(seed - ? AS INTEGER)) AS delay
                     FROM sites
                     ORDER BY delay ASC
                     LIMIT 1
             """,
-            [curr_seed, ui, ui, ui, curr_seed, curr_seed]
+            [curr_seed, curr_seed, curr_seed]
         ).fetchone()
         DB.release()
         if not delay_to_next:
-            time.sleep(ui * (random.random() * 0.9 + 0.1))
+            time.sleep(smallest_frequency * (random.random() * 0.9 + 0.1))
         else:
             delay = max(delay_to_next[0], 1)
             time.sleep(delay)
-
-
 
 
 if __name__ == '__main__':
@@ -732,7 +769,21 @@ if __name__ == '__main__':
     UPDATE_INTERVAL_SECONDS = int(CONFIG["update_interval_seconds"])
 
     STDIO_SUPPRESSION_FILE = open(os.devnull, "w")
+
+    UPDATE_FREQUENCIES = {}
+    for name, val in CONFIG["update_frequencies_seconds"].items():
+        UPDATE_FREQUENCIES[name] = int(val)
+
+    UPDATE_FREQUENCY_NAMES = {freq: name for name, freq in UPDATE_FREQUENCIES.items()}
+
+    DEFAULT_UPDATE_FREQUENCY = UPDATE_FREQUENCIES[CONFIG["default_update_frequency"]]
+
+    TIMESTEP = math.lcm(*UPDATE_FREQUENCIES.values())
+    assert(TIMESTEP < INT_MAX)
+
     setup_db()
+
+
     setup_tg_bot()
     poll_sites()
 

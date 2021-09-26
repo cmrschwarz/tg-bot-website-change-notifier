@@ -2,7 +2,7 @@
     "bot_token": "<Your bot Token Here>",
     "update_interval_seconds": 3600,
     "max_sites_per_user": 100,
-    "default_diff_mode": "render",
+    "default_diff_mode": "html",
     "max_url_len": -1,
     "num_worker_threads": 16
 }
