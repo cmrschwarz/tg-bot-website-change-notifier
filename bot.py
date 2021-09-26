@@ -175,8 +175,8 @@ def cmd_help(update, context):
             /mode <id> <mode>   change update detection method for url
 
         MODES:
-            render              the diff is based on an image of the site rendered using imgkit
-            html                the diff is based on the raw html of the site (default)
+            render              the diff is based on an image of the site rendered using imgkit (default)
+            html                the diff is based on the raw html of the site
 
     """)
     reply_to_msg(update.message, True, text, monospaced=True)
@@ -214,21 +214,41 @@ def cmd_list(update, context):
         else:
             sites_by_mode[mode].append((id, url))
 
-    explicit_reply = True
+    single_reply = True
     sitelist = ""
+    first_mode = True
+    modes_end = []
     for mode, sites in sites_by_mode.items():
+        if not single_reply:
+            reply_to_msg(update.message, False, sitelist, monospaced=True)
+            modes_end = []
+            sitelist = ""
+        else:
+            if first_mode:
+                first_mode = False
+            else:
+                sitelist += "\n"
+                modes_end.append(len(sitelist))
         sitelist += mode.to_string() + " mode:\n"
         for id, url in sites:
             line = f"    {' ' * (longest_id - len(id)) + id}: {cutoff(url, longest_id + 7)}\n"
             line_len = len(line)
             if len(sitelist) + line_len > telegram.MAX_MESSAGE_LENGTH:
-                reply_to_msg(update.message, False, sitelist, monospaced=True)
-                explicit_reply = False
-                sitelist = line
+                single_reply = False
+                last_me = 0
+                for me in modes_end:
+                    reply_to_msg(update.message, False, sitelist[last_me:me], monospaced=True)
+                    last_me = me
+                if modes_end:
+                    sitelist = sitelist[last_me:] + line
+                    modes_end = []
+                else:
+                    reply_to_msg(update.message, False, sitelist[last_me:me], monospaced=True)
+                    sitelist = line
             else:
                 sitelist +=  line
     if sitelist != "":
-        reply_to_msg(update.message, explicit_reply, sitelist, monospaced=True)
+        reply_to_msg(update.message, single_reply, sitelist, monospaced=True)
 
 
 def cmd_add(update, context):
@@ -359,7 +379,7 @@ def cmd_mode(update, context):
     args = args[len(cmd):].strip()
     id_str = args.split()[0]
     try:
-        id = int(id_str)
+        site_id = int(id_str)
     except Exception as ex:
         reply_to_msg(update.message, True, f"invalid <id> '{id_str}'")
         return
@@ -377,7 +397,7 @@ def cmd_mode(update, context):
     try:
         uid = get_user_id(update.message)
         res = cur.execute(
-            "SELECT site_id, url, mode FROM notifications INNER JOIN sites ON id = site_id WHERE site_id = ? AND user_id = ?",
+            "SELECT url, mode FROM notifications INNER JOIN sites ON id = site_id WHERE site_id = ? AND user_id = ?",
             [site_id, uid]
         ).fetchone()
     except Exception as ex:
@@ -389,7 +409,7 @@ def cmd_mode(update, context):
         reply_to_msg(update.message, True, f'no site with that id present')
         return
 
-    site_id, url, mode = res
+    url, mode = res
     if mode == diff_mode.to_int():
         reply_to_msg(update.message, True, f'site is already in this mode')
         return
