@@ -169,10 +169,10 @@ def cmd_help(update, context):
     text = dedent("""\
         COMMANDS:
             /help               print this menu
-            /list               list all currently tracked sites
+            /list               list all currently tracked sites and their ids
             /add <url>          add a new site to track
             /remove <id>        remove a site
-            /mode <mode> <id>   change update detection method for url
+            /mode <id> <mode>   change update detection method for url
 
         MODES:
             render              the diff is based on an image of the site rendered using imgkit
@@ -307,13 +307,15 @@ def cmd_add(update, context):
 
 def cmd_remove(update, context):
     global DB
+    cmd = "/remove"
+    rm_id_str = update.message.text
+    assert(rm_id_str[0:len(cmd)] == cmd)
+    rm_id_str = rm_id_str[len(cmd):].strip()
     try:
-        cmd = "/remove"
-        rm_id = update.message.text
-        assert(rm_id[0:len(cmd)] == cmd)
-        rm_id = int(rm_id[len(cmd):].strip())
+        rm_id = int(rm_id_str)
     except Exception as ex:
-        reply_to_msg(update.message, True, f'invalid argument for /remove <id>')
+        reply_to_msg(update.message, True, f"invalid <id> '{rm_id_str}'")
+        return
 
     try:
         cur = DB.aquire()
@@ -351,33 +353,23 @@ def update_notification_site(message, cursor, user_id, site_id_old, site_id_new,
 
 def cmd_mode(update, context):
     global DB
+    cmd = "/mode"
+    args = update.message.text
+    assert(args[0:len(cmd)] == cmd)
+    args = args[len(cmd):].strip()
+    id_str = args.split()[0]
     try:
-        cmd = "/mode"
-        args = update.message.text
-        assert(args[0:len(cmd)] == cmd)
-        args = args[len(cmd):].lstrip()
-        diff_mode = None
-        for mode in DiffMode:
-            if args[0:len(mode.to_string())].lower() == mode.to_string():
-                diff_mode = mode
-                break
+        id = int(id_str)
     except Exception as ex:
-        reply_to_msg(update.message, True, 'invalid argument for mode, command must have the form /mode <MODE> <id>')
+        reply_to_msg(update.message, True, f"invalid <id> '{id_str}'")
         return
 
+    mode_str = args[len(id_str):].strip()
+    diff_mode = DiffMode.from_string(mode_str)
     if not diff_mode:
         reply_to_msg(
             update.message, True,
-            f"unknown mode '{args.split()[0]}', see /help for a list of available modes"
-        )
-        return
-
-    try:
-        site_id = int(args[len(diff_mode.to_string()) + 1].strip())
-    except:
-        reply_to_msg(
-            update.message, True,
-            'invalid argument for id, command must have the form /mode <MODE> <id>'
+            f"unknown <mode> '{mode_str}'"
         )
         return
 
