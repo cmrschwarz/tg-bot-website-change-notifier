@@ -215,6 +215,8 @@ def get_user_id(message):
 
     return res[0]
 
+def cmd_start(update, context):
+    reply_to_msg(update.message, True, "Hello! Please use /help for a list of commands.")
 
 def cmd_help(update, context):
     text = dedent("""\
@@ -223,7 +225,7 @@ def cmd_help(update, context):
             /list               list all currently tracked sites and their ids
             /add <url>          add a new site to track
             /remove <id>        remove a site
-            /mode <id> <mode>   change update detection method for url
+            /mode <id> <mode>   change the update detection method for a site
 
         MODES:
             render              the diff is based on an image of the site rendered using imgkit (default)
