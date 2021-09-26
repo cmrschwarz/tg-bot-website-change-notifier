@@ -228,6 +228,9 @@ def cmd_start(update, context):
 
 def cmd_help(update, context):
     global DEFAULT_DIFF_MODE
+    global UPDATE_INTERVAL_SECONDS
+    global MAX_SITES_PER_USER
+    global MAX_URL_LEN
     default_tag = lambda mode: "(default)" if (mode == DEFAULT_DIFF_MODE) else ""
     text = dedent(f"""\
         COMMANDS:
@@ -240,6 +243,11 @@ def cmd_help(update, context):
         MODES:
             render              the diff is based on an image of the site rendered using imgkit {default_tag(DiffMode.RENDER)}
             html                the diff is based on the raw html of the site {default_tag(DiffMode.HTML)}
+
+        INSTANCE SETTINGS
+            update interval     {UPDATE_INTERVAL_SECONDS} seconds
+            max sites per user  {MAX_SITES_PER_USER}
+            max url length      {MAX_URL_LEN}
 
     """)
     reply_to_msg(update.message, True, text, monospaced=True)
@@ -651,7 +659,8 @@ def poll_sites():
     global CONFIG
     global DB
     global NUM_WORKER_THREADS
-    update_interval_secs = float(CONFIG["update_interval_seconds"])
+    global UPDATE_INTERVAL_SECONDS
+    ui = UPDATE_INTERVAL_SECONDS
     thread_pool = ThreadPoolExecutor(NUM_WORKER_THREADS)
     last_poll = datetime.datetime.now()
     curr_seed = 0
@@ -668,7 +677,7 @@ def poll_sites():
                     WHERE delay < ?
                     ORDER BY delay ASC
             """,
-            [curr_seed, update_interval_secs, update_interval_secs,  update_interval_secs, secs_since_last]
+            [curr_seed, ui, ui, ui, secs_since_last]
         )
         while True:
             res = query.fetchone()
@@ -676,7 +685,7 @@ def poll_sites():
             site_id, url, mode, hash, _delay = res
             mode = DiffMode.from_int(mode)
             thread_pool.submit(poll_site, site_id, url, mode, hash)
-        curr_seed = (curr_seed + secs_since_last) % update_interval_secs
+        curr_seed = (curr_seed + secs_since_last) % ui
         # more compact would be mod(mod(seed - curr_seed, update_interval_secs) + update_interval_secs, update_interval_secs)
         # but not all instances of sqlite3 support the mod function
         delay_to_next = cur.execute(
@@ -686,11 +695,11 @@ def poll_sites():
                     ORDER BY delay ASC
                     LIMIT 1
             """,
-            [curr_seed, update_interval_secs, update_interval_secs, update_interval_secs, curr_seed, curr_seed]
+            [curr_seed, ui, ui, ui, curr_seed, curr_seed]
         ).fetchone()
         DB.release()
         if not delay_to_next:
-            time.sleep(update_interval_secs * (random.random() * 0.9 + 0.1))
+            time.sleep(ui * (random.random() * 0.9 + 0.1))
         else:
             delay = max(delay_to_next[0], 1)
             time.sleep(delay)
@@ -718,6 +727,8 @@ if __name__ == '__main__':
         nwt = int(CONFIG["num_worker_threads"])
         if nwt > 0:
             NUM_WORKER_THREADS = nwt
+
+    UPDATE_INTERVAL_SECONDS = int(CONFIG["update_interval_seconds"])
 
     STDIO_SUPPRESSION_FILE = open(os.devnull, "w")
     setup_db()
