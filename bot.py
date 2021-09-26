@@ -99,6 +99,8 @@ DEFAULT_DIFF_MODE = DiffMode.HTML
 
 MAX_SITES_PER_USER = 100
 
+NUM_WORKER_THREADS = 16
+
 def get_site_hash(url, diff_mode):
     global STDIO_SUPPRESSION_FILE
     try:
@@ -566,7 +568,7 @@ def cmd_mode(update, context):
 def setup_tg_bot():
     global CONFIG
     global BOT
-    BOT = Updater(CONFIG["bot_token"], use_context=True)
+    BOT = Updater(CONFIG["bot_token"], use_context=True, workers=NUM_WORKER_THREADS)
 
     dp = BOT.dispatcher
 
@@ -647,9 +649,9 @@ def poll_site(site_id, url, mode, old_hash):
 def poll_sites():
     global CONFIG
     global DB
+    global NUM_WORKER_THREADS
     update_interval_secs = float(CONFIG["update_interval_seconds"])
-    num_worker_threads = int(CONFIG["num_worker_threads"])
-    thread_pool = ThreadPoolExecutor(num_worker_threads)
+    thread_pool = ThreadPoolExecutor(NUM_WORKER_THREADS)
     last_poll = datetime.datetime.now()
     curr_seed = 0
     while True:
@@ -709,6 +711,11 @@ if __name__ == '__main__':
 
     if "max_sites_per_user" in CONFIG:
         MAX_SITES_PER_USER = int(CONFIG["max_sites_per_user"])
+
+    if "max_sites_per_user" in CONFIG:
+        nwt = int(CONFIG["num_worker_threads"])
+        if nwt > 0:
+            NUM_WORKER_THREADS = nwt
 
     STDIO_SUPPRESSION_FILE = open(os.devnull, "w")
     setup_db()
