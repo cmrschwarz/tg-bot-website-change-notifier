@@ -94,6 +94,8 @@ MAX_URL_PREFIX_LEN = 4 + len(str((2**32))) + 1 + 1 # 4 spaces + id name + colon 
 # this limit ensures that each line in /list is a clickable url
 MAX_URL_LEN = telegram.MAX_MESSAGE_LENGTH - MAX_URL_PREFIX_LEN
 
+DEFAULT_DIFF_MODE = DiffMode.HTML
+
 def get_site_hash(url, diff_mode):
     global STDIO_SUPPRESSION_FILE
     try:
@@ -219,7 +221,9 @@ def cmd_start(update, context):
     reply_to_msg(update.message, True, "Hello! Please use /help for a list of commands.")
 
 def cmd_help(update, context):
-    text = dedent("""\
+    global DEFAULT_DIFF_MODE
+    default_tag = lambda mode: "(default)" if (mode == DEFAULT_DIFF_MODE) else ""
+    text = dedent(f"""\
         COMMANDS:
             /help               print this menu
             /list               list all currently tracked sites and their ids
@@ -228,8 +232,8 @@ def cmd_help(update, context):
             /mode <id> <mode>   change the update detection method for a site
 
         MODES:
-            render              the diff is based on an image of the site rendered using imgkit (default)
-            html                the diff is based on the raw html of the site
+            render              the diff is based on an image of the site rendered using imgkit {default_tag(DiffMode.RENDER)}
+            html                the diff is based on the raw html of the site {default_tag(DiffMode.HTML)}
 
     """)
     reply_to_msg(update.message, True, text, monospaced=True)
@@ -333,6 +337,7 @@ def cmd_add(update, context):
     global DB
     global CONFIG
     global MAX_URL_LEN
+    global DEFAULT_DIFF_MODE
     url = update.message.text
     try:
         cmd = "/add"
@@ -346,7 +351,7 @@ def cmd_add(update, context):
         reply_to_msg(update.message, True, f'failed to parse url')
         return
 
-    diff_mode = DiffMode.from_string(CONFIG["default_diff_mode"])
+    diff_mode = DEFAULT_DIFF_MODE
 
     cur = DB.aquire()
     select_query = lambda: cur.execute(
@@ -682,6 +687,10 @@ if __name__ == '__main__':
         mul = int(CONFIG["max_url_len"])
         if mul > 0:
             MAX_URL_LEN = mul
+
+    if "default_diff_mode" in CONFIG:
+        DEFAULT_DIFF_MODE = DiffMode.from_string(CONFIG["default_diff_mode"])
+
     STDIO_SUPPRESSION_FILE = open(os.devnull, "w")
     setup_db()
     setup_tg_bot()
