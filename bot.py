@@ -18,6 +18,7 @@ import sqlite3
 import os
 import sys
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 
 from enum import Enum
 from telegram import (MessageEntity, ParseMode, InlineKeyboardButton)
@@ -609,9 +610,11 @@ def setup_db():
     """)
     DB.commit_release()
 
-def inform_site_changed(db_cur, site_id, mode, new_hash):
+def inform_site_changed(site_id, mode, new_hash):
+    global DB
     global BOT
-    db_cur.execute("""
+    cur = DB.aquire()
+    cur.execute("""
         SELECT tg_chat_id, url
             FROM notifications
             INNER JOIN sites ON notifications.site_id = sites.id
@@ -621,7 +624,7 @@ def inform_site_changed(db_cur, site_id, mode, new_hash):
         [site_id]
     )
     while True:
-        res = db_cur.fetchone()
+        res = cur.fetchone()
         if not res: break
         tg_chat_id, url = res
         if new_hash:
@@ -629,14 +632,24 @@ def inform_site_changed(db_cur, site_id, mode, new_hash):
         else:
             msg = cutoff("site became unavailable:\n" + url)
         BOT.bot.send_message(tg_chat_id, msg)
+    DB.release()
+
+def poll_site(site_id, url, mode, old_hash):
+    global DB
+    new_hash = get_site_hash(url, mode)
+    if old_hash == new_hash: return
+
+    cur = DB.aquire()
+    cur.execute("UPDATE sites SET hash = ? WHERE id = ?", [new_hash, site_id])
+    DB.release()
+    inform_site_changed(site_id, mode, new_hash)
 
 def poll_sites():
     global CONFIG
-    update_interval_secs = float(CONFIG["update_interval_seconds"])
     global DB
-    # we use a separate connection for this so we don't stall the bot interaction while
-    # our updates are running
-    db = sqlite3.connect(DB.url)
+    update_interval_secs = float(CONFIG["update_interval_seconds"])
+    num_worker_threads = int(CONFIG["num_worker_threads"])
+    thread_pool = ThreadPoolExecutor(num_worker_threads)
     last_poll = datetime.datetime.now()
     curr_seed = 0
     while True:
@@ -644,10 +657,10 @@ def poll_sites():
         diff = now - last_poll
         last_poll = now
         secs_since_last = diff.total_seconds()
-        cur = db.cursor()
+        cur = DB.aquire()
         query = cur.execute(
             f"""
-                SELECT id, url, mode, hash, seed, ((seed - ?) % ? + ?) % ? AS delay
+                SELECT id, url, mode, hash, ((seed - ?) % ? + ?) % ? AS delay
                     FROM sites
                     WHERE delay < ?
                     ORDER BY delay ASC
@@ -657,15 +670,9 @@ def poll_sites():
         while True:
             res = query.fetchone()
             if not res: break
-            site_id, url, mode, hash, seed, delay = res
+            site_id, url, mode, hash, _delay = res
             mode = DiffMode.from_int(mode)
-            new_hash = get_site_hash(url, mode)
-            if hash == new_hash: continue
-            notif_cur = db.cursor()
-            notif_cur.execute("UPDATE sites SET hash = ? WHERE id = ?", [new_hash, site_id])
-            db.commit()
-            inform_site_changed(notif_cur, site_id, mode, new_hash)
-            notif_cur.close()
+            thread_pool.submit(poll_site, site_id, url, mode, hash)
 
         curr_seed = (curr_seed + secs_since_last) % update_interval_secs
         delay_to_next = cur.execute(
@@ -677,12 +684,12 @@ def poll_sites():
             """,
             [curr_seed, update_interval_secs, update_interval_secs,  update_interval_secs]
         ).fetchone()
+        DB.release()
         if not delay_to_next:
             time.sleep(update_interval_secs * (random.random() * 0.9 + 0.1))
         else:
             delay = max(delay_to_next[0], 1)
             time.sleep(delay)
-        cur.close()
 
 
 

@@ -3,5 +3,6 @@
     "update_interval_seconds": 3600,
     "max_sites_per_user": 100,
     "default_diff_mode": "render",
-    "max_url_len": -1
+    "max_url_len": -1,
+    "num_worker_threads": 16
 }
