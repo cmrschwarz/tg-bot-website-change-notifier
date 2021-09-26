@@ -96,6 +96,8 @@ MAX_URL_LEN = telegram.MAX_MESSAGE_LENGTH - MAX_URL_PREFIX_LEN
 
 DEFAULT_DIFF_MODE = DiffMode.HTML
 
+MAX_SITES_PER_USER = 100
+
 def get_site_hash(url, diff_mode):
     global STDIO_SUPPRESSION_FILE
     try:
@@ -338,6 +340,7 @@ def cmd_add(update, context):
     global CONFIG
     global MAX_URL_LEN
     global DEFAULT_DIFF_MODE
+    global MAX_SITES_PER_USER
     url = update.message.text
     try:
         cmd = "/add"
@@ -351,16 +354,21 @@ def cmd_add(update, context):
         reply_to_msg(update.message, True, f'failed to parse url')
         return
 
-    diff_mode = DEFAULT_DIFF_MODE
-
     cur = DB.aquire()
     select_query = lambda: cur.execute(
             "SELECT id FROM sites WHERE url = ? AND mode = ?",
-            [url, diff_mode.to_int()]
+            [url, DEFAULT_DIFF_MODE.to_int()]
         ).fetchmany(2)
 
     try:
         uid = get_user_id(update.message)
+        res = cur.execute("SELECT COUNT(*) FROM notifications WHERE user_id = ?", [uid]).fetchone()
+        if res[0] >= MAX_SITES_PER_USER:
+            reply_to_msg(
+                update.message, True,
+                f'the sites per user limit ({MAX_SITES_PER_USER}) would be exceeded. refusing to add this url.',
+            )
+            return
         res = select_query()
     except Exception as ex:
         DB.release()
@@ -369,7 +377,7 @@ def cmd_add(update, context):
     site_added = False
     if not res:
         DB.release()
-        hash = get_site_hash(url, diff_mode)
+        hash = get_site_hash(url, DEFAULT_DIFF_MODE)
         if not hash:
             reply_to_msg(
                 update.message, True,
@@ -380,7 +388,7 @@ def cmd_add(update, context):
         try:
             res = select_query()
             if not res:
-                cur.execute("INSERT INTO sites (url, mode, hash, seed) VALUES (?, ?, ?, ?)", [url, diff_mode.to_int(), hash, random_seed()])
+                cur.execute("INSERT INTO sites (url, mode, hash, seed) VALUES (?, ?, ?, ?)", [url, DEFAULT_DIFF_MODE.to_int(), hash, random_seed()])
                 site_added = True
                 res = select_query()
         except Exception as ex:
@@ -683,6 +691,7 @@ if __name__ == '__main__':
     SCRIPT_DIR_PATH = os.path.dirname(os.path.realpath(__file__))
     with open(SCRIPT_DIR_PATH + "/config.json", "r") as f:
         CONFIG = json.load(f)
+
     if "max_url_len" in CONFIG:
         mul = int(CONFIG["max_url_len"])
         if mul > 0:
@@ -690,6 +699,9 @@ if __name__ == '__main__':
 
     if "default_diff_mode" in CONFIG:
         DEFAULT_DIFF_MODE = DiffMode.from_string(CONFIG["default_diff_mode"])
+
+    if "max_sites_per_user" in CONFIG:
+        MAX_SITES_PER_USER = int(CONFIG["max_sites_per_user"])
 
     STDIO_SUPPRESSION_FILE = open(os.devnull, "w")
     setup_db()
