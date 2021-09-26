@@ -675,16 +675,17 @@ def poll_sites():
             site_id, url, mode, hash, _delay = res
             mode = DiffMode.from_int(mode)
             thread_pool.submit(poll_site, site_id, url, mode, hash)
-
         curr_seed = (curr_seed + secs_since_last) % update_interval_secs
+        # more compact would be mod(mod(seed - curr_seed, update_interval_secs) + update_interval_secs, update_interval_secs)
+        # but not all instances of sqlite3 support the mod function
         delay_to_next = cur.execute(
             f"""
-                SELECT mod(mod(seed - ?, ?) + ?, ?) AS delay
+                SELECT (CAST(seed - ? AS INTEGER) % ? + ?) % ? + ABS((seed - ?) - CAST(seed - ? AS INTEGER)) AS delay
                     FROM sites
                     ORDER BY delay ASC
                     LIMIT 1
             """,
-            [curr_seed, update_interval_secs, update_interval_secs,  update_interval_secs]
+            [curr_seed, update_interval_secs, update_interval_secs, update_interval_secs, curr_seed, curr_seed]
         ).fetchone()
         DB.release()
         if not delay_to_next:
