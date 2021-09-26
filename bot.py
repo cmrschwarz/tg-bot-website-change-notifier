@@ -124,9 +124,9 @@ def get_site_hash(url, diff_mode):
         )
         return None
 
-def cutoff(txt, rem_len_needed=0):
+def cutoff(txt, rem_len_needed=0, max_len=telegram.MAX_MESSAGE_LENGTH):
     txt_len = len(txt)
-    max_txt_len = telegram.MAX_MESSAGE_LENGTH - rem_len_needed
+    max_txt_len = max_len - rem_len_needed
     if max_txt_len >= txt_len: return txt
     if max_txt_len > 5: return txt[0:max_txt_len-4] + " ..."
     if max_txt_len < 0: return ""
@@ -177,6 +177,7 @@ def reply_to_msg(message, explicit_reply, txt, monospaced=False, extra_entities=
                 break
             relevant_entities.append(e)
         message.reply_text(txt_co[0:telegram.MAX_MESSAGE_LENGTH], reply_to_message_id=reply_to_message_id, entities=relevant_entities, disable_web_page_preview=disable_web_page_preview)
+        reply_to_message_id=None
         for e in entities:
             e.offset -= telegram.MAX_MESSAGE_LENGTH
         txt_co = txt_co[telegram.MAX_MESSAGE_LENGTH:]
@@ -410,7 +411,7 @@ def cmd_remove(update, context):
     try:
         rm_id = int(rm_id_str)
     except Exception as ex:
-        reply_to_msg(update.message, True, f"invalid <id> '{rm_id_str}'")
+        reply_to_msg(update.message, True, f"invalid <id> '{cutoff(rm_id_str, max_len=100)}'")
         return
 
     try:
@@ -457,7 +458,7 @@ def cmd_mode(update, context):
     try:
         site_id = int(id_str)
     except Exception as ex:
-        reply_to_msg(update.message, True, f"invalid <id> '{id_str}'")
+        reply_to_msg(update.message, True, f"invalid <id> '{cutoff(id_str, max_len=100)}'")
         return
 
     mode_str = args[len(id_str):].strip()
@@ -465,7 +466,7 @@ def cmd_mode(update, context):
     if not diff_mode:
         reply_to_msg(
             update.message, True,
-            f"unknown <mode> '{mode_str}'"
+            f"unknown <mode> '{cutoff(mode_str, max_len=100)}'"
         )
         return
 
