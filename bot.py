@@ -21,6 +21,7 @@ import contextlib
 
 from enum import Enum
 from telegram import (MessageEntity, ParseMode, InlineKeyboardButton)
+from telegram.constants import MESSAGEENTITY_URL
 from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters,
                           PollAnswerHandler)
 
@@ -127,12 +128,27 @@ def cutoff(txt, rem_len_needed=0):
     if max_txt_len < 0: return ""
     return "....."[0:max_txt_len]
 
-def reply_to_msg(message, explicit_reply, txt, monospaced=False):
-    entities = None
-    txt = cutoff(txt)
+def reply_to_msg(message, explicit_reply, txt, monospaced=False, extra_entities=None, disable_web_page_preview=None):
+    txt_co = cutoff(txt.rstrip())
+    txt_co_len = len(txt_co)
+    entities=[]
+    if extra_entities:
+        for e in extra_entities:
+            if e.offset < txt_co_len:
+                e.length = min(txt_co_len - e.offset, e.length)
+                entities.append(e)
     if monospaced:
-        entities=[MessageEntity(MessageEntity.CODE, 0, len(txt))]
-    message.reply_text(txt, reply_to_message_id=message.message_id if explicit_reply else None, entities=entities)
+        last_end = 0
+        ms_entities = []
+        for e in entities:
+            if e.offset != last_end:
+                ms_entities.append(MessageEntity(MessageEntity.CODE, last_end, e.offset - last_end))
+            last_end = e.offset + e.length
+        if last_end != txt_co_len:
+            ms_entities.append(MessageEntity(MessageEntity.CODE, last_end, txt_co_len - last_end))
+        entities += ms_entities
+        entities.sort(key=lambda e:e.offset)
+    message.reply_text(txt_co, reply_to_message_id=message.message_id if explicit_reply else None, entities=entities, disable_web_page_preview=disable_web_page_preview)
 
 def random_seed():
     return random.randint(0, 2**31)
@@ -217,38 +233,60 @@ def cmd_list(update, context):
     single_reply = True
     sitelist = ""
     first_mode = True
-    modes_end = []
+    mode_ends = []
+    entity_ends = []
+    entities = []
+    line_prefix_len = 4 + longest_id + 1 + 1 # 4 spaces + longest_id + colon + space
     for mode, sites in sites_by_mode.items():
         if not single_reply:
-            reply_to_msg(update.message, False, sitelist, monospaced=True)
-            modes_end = []
+            reply_to_msg(update.message, False, sitelist, monospaced=True, extra_entities=entities)
+            mode_ends = []
+            entity_ends = []
+            entities = []
             sitelist = ""
         else:
             if first_mode:
                 first_mode = False
             else:
                 sitelist += "\n"
-                modes_end.append(len(sitelist))
+                mode_ends.append(len(sitelist))
+                entity_ends.append(len(entities))
         sitelist += mode.to_string() + " mode:\n"
         for id, url in sites:
             line = f"    {' ' * (longest_id - len(id)) + id}: {cutoff(url, longest_id + 7)}\n"
+            entities.append(MessageEntity(MessageEntity.URL, len(sitelist) + line_prefix_len, len(line) - line_prefix_len))
             line_len = len(line)
             if len(sitelist) + line_len > telegram.MAX_MESSAGE_LENGTH:
                 single_reply = False
                 last_me = 0
-                for me in modes_end:
-                    reply_to_msg(update.message, False, sitelist[last_me:me], monospaced=True)
+                last_ee = 0
+                for i in range(0,len(mode_ends)):
+                    me = mode_ends[i]
+                    ee = entity_ends[i]
+                    relevant_entities = []
+                    for e in entities[last_ee:ee]:
+                        e.offset -= last_me
+                        relevant_entities.append(e)
+                    reply_to_msg(update.message, False, sitelist[last_me:me], monospaced=True, extra_entities=relevant_entities, disable_web_page_preview=True)
                     last_me = me
-                if modes_end:
+                    last_ee = ee
+                if mode_ends:
                     sitelist = sitelist[last_me:] + line
-                    modes_end = []
+                    entities = entities[last_ee:]
+                    mode_ends = []
+                    entity_ends = []
                 else:
-                    reply_to_msg(update.message, False, sitelist[last_me:me], monospaced=True)
+                    reply_to_msg(update.message, False, sitelist, monospaced=True, disable_web_page_preview=True, extra_entities=entities[:-1])
+                    entities = entities[-1:]
+                    last_me = len(sitelist)
                     sitelist = line
+                for e in entities:
+                    e.offset -= last_me
+
             else:
-                sitelist +=  line
+                sitelist += line
     if sitelist != "":
-        reply_to_msg(update.message, single_reply, sitelist, monospaced=True)
+        reply_to_msg(update.message, single_reply, sitelist, monospaced=True, extra_entities = entities, disable_web_page_preview=True)
 
 
 def cmd_add(update, context):
