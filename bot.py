@@ -581,6 +581,7 @@ def setup_tg_bot():
 
     dp = BOT.dispatcher
 
+    dp.add_handler(CommandHandler('start', cmd_start))
     dp.add_handler(CommandHandler('help', cmd_help))
     dp.add_handler(CommandHandler('list', cmd_list))
     dp.add_handler(CommandHandler('add', cmd_add))
