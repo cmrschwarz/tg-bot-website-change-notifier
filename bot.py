@@ -89,6 +89,10 @@ global CONFIG
 global BOT
 global SCRIPT_DIR_PATH
 global STDIO_SUPPRESSION_FILE
+# the maximum number of characters before the url in /list
+MAX_URL_PREFIX_LEN = 4 + len(str((2**32))) + 1 + 1 # 4 spaces + id name + colon + space
+# this limit ensures that each line in /list is a clickable url
+MAX_URL_LEN = telegram.MAX_MESSAGE_LENGTH - MAX_URL_PREFIX_LEN
 
 def get_site_hash(url, diff_mode):
     global STDIO_SUPPRESSION_FILE
@@ -129,7 +133,7 @@ def cutoff(txt, rem_len_needed=0):
     return "....."[0:max_txt_len]
 
 def reply_to_msg(message, explicit_reply, txt, monospaced=False, extra_entities=None, disable_web_page_preview=None):
-    txt_co = cutoff(txt.rstrip())
+    txt_co = txt.rstrip()
     txt_co_len = len(txt_co)
     entities=[]
     if extra_entities:
@@ -138,17 +142,47 @@ def reply_to_msg(message, explicit_reply, txt, monospaced=False, extra_entities=
                 e.length = min(txt_co_len - e.offset, e.length)
                 entities.append(e)
     if monospaced:
-        last_end = 0
-        ms_entities = []
+        if extra_entities:
+            last_end = 0
+            entites_with_ms = []
+            for e in entities:
+                if e.offset != last_end:
+                    entites_with_ms.append(MessageEntity(MessageEntity.CODE, last_end, e.offset - last_end))
+                last_end = e.offset + e.length
+                entites_with_ms.append(e)
+            if last_end != txt_co_len:
+                entites_with_ms.append(MessageEntity(MessageEntity.CODE, last_end, txt_co_len - last_end))
+            entities = entites_with_ms
+        else:
+            entities = [MessageEntity(MessageEntity.CODE, 0, txt_co_len)]
+
+    reply_to_message_id=message.message_id if explicit_reply else None
+
+    while txt_co_len > telegram.MAX_MESSAGE_LENGTH:
+        relevant_entities = []
+        for i in range(len(entities)):
+            e = entities[i]
+            if e.offset > telegram.MAX_MESSAGE_LENGTH:
+                entities = entities[i:]
+                break
+            if e.offset + e.length > telegram.MAX_MESSAGE_LENGTH:
+                if e.type == MessageEntity.URL:
+                    # splitting a url, make it not clickable to prevent confusion
+                    e.type = MessageEntity.CODE
+                relevant_length = telegram.MAX_MESSAGE_LENGTH - e.offset
+                relevant_entities.append(MessageEntity(e.type, e.offset, relevant_length))
+                e.offset = telegram.MAX_MESSAGE_LENGTH
+                e.length -= relevant_length
+                entities = entities[i:]
+                break
+            relevant_entities.append(e)
+        message.reply_text(txt_co[0:telegram.MAX_MESSAGE_LENGTH], reply_to_message_id=reply_to_message_id, entities=relevant_entities, disable_web_page_preview=disable_web_page_preview)
         for e in entities:
-            if e.offset != last_end:
-                ms_entities.append(MessageEntity(MessageEntity.CODE, last_end, e.offset - last_end))
-            last_end = e.offset + e.length
-        if last_end != txt_co_len:
-            ms_entities.append(MessageEntity(MessageEntity.CODE, last_end, txt_co_len - last_end))
-        entities += ms_entities
-        entities.sort(key=lambda e:e.offset)
-    message.reply_text(txt_co, reply_to_message_id=message.message_id if explicit_reply else None, entities=entities, disable_web_page_preview=disable_web_page_preview)
+            e.offset -= telegram.MAX_MESSAGE_LENGTH
+        txt_co = txt_co[telegram.MAX_MESSAGE_LENGTH:]
+        txt_co_len -= telegram.MAX_MESSAGE_LENGTH
+
+    message.reply_text(txt_co, reply_to_message_id=reply_to_message_id, entities=entities, disable_web_page_preview=disable_web_page_preview)
 
 def random_seed():
     return random.randint(0, 2**31)
@@ -253,10 +287,10 @@ def cmd_list(update, context):
                 entity_ends.append(len(entities))
         sitelist += mode.to_string() + " mode:\n"
         for id, url in sites:
-            line = f"    {' ' * (longest_id - len(id)) + id}: {cutoff(url, longest_id + 7)}\n"
+            line = f"    {' ' * (longest_id - len(id)) + id}: {url}\n"
             entities.append(MessageEntity(MessageEntity.URL, len(sitelist) + line_prefix_len, len(line) - line_prefix_len))
             line_len = len(line)
-            if len(sitelist) + line_len > telegram.MAX_MESSAGE_LENGTH:
+            while len(sitelist) + line_len > telegram.MAX_MESSAGE_LENGTH:
                 single_reply = False
                 last_me = 0
                 last_ee = 0
@@ -271,17 +305,20 @@ def cmd_list(update, context):
                     last_me = me
                     last_ee = ee
                 if mode_ends:
-                    sitelist = sitelist[last_me:] + line
+                    sitelist = sitelist[last_me:]
                     entities = entities[last_ee:]
                     mode_ends = []
                     entity_ends = []
+                    for e in entities:
+                        e.offset -= last_me
+                    continue
                 else:
                     reply_to_msg(update.message, False, sitelist, monospaced=True, disable_web_page_preview=True, extra_entities=entities[:-1])
                     entities = entities[-1:]
-                    last_me = len(sitelist)
+                    entities[0].offset -= len(sitelist)
                     sitelist = line
-                for e in entities:
-                    e.offset -= last_me
+                    break
+
 
             else:
                 sitelist += line
@@ -292,13 +329,14 @@ def cmd_list(update, context):
 def cmd_add(update, context):
     global DB
     global CONFIG
+    global MAX_URL_LEN
     url = update.message.text
     try:
         cmd = "/add"
         assert(url[0:4] == cmd)
         url = url[len(cmd):].strip()
-        if len(url) > CONFIG["max_url_len"]:
-            reply_to_msg(update.message, True, f'url is too long, refusing to track')
+        if len(url) > MAX_URL_LEN:
+            reply_to_msg(update.message, True, f'url is too long (limit is set to {MAX_URL_LEN}), refusing to track')
             return
         parsed = urllib.parse.urlparse(url)
     except Exception as e:
@@ -637,6 +675,10 @@ if __name__ == '__main__':
     SCRIPT_DIR_PATH = os.path.dirname(os.path.realpath(__file__))
     with open(SCRIPT_DIR_PATH + "/config.json", "r") as f:
         CONFIG = json.load(f)
+    if "max_url_len" in CONFIG:
+        mul = int(CONFIG["max_url_len"])
+        if mul > 0:
+            MAX_URL_LEN = mul
     STDIO_SUPPRESSION_FILE = open(os.devnull, "w")
     setup_db()
     setup_tg_bot()
