@@ -492,8 +492,11 @@ def try_change_mode_for_notification(message, user_id, site_id_curr, url, freq, 
     global DB
     cur = DB.aquire()
     try:
+        # check if site with changed config already exists
         site_id_new = get_site_id(cur, url, mode_new, freq)
         if not site_id_new: return False
+
+        # complain if we already use that site
         res = cur.execute(
             "SELECT site_id FROM notifications WHERE site_id = ? AND user_id = ?",
             [site_id_new, user_id]
@@ -504,10 +507,16 @@ def try_change_mode_for_notification(message, user_id, site_id_curr, url, freq, 
                 f'already tracking this url in {mode_new.to_string()} mode with id {res[0]}',
             )
             return True
+
+        # swap over to use that site
         cur.execute(
             "UPDATE notifications SET site_id = ? WHERE site_id = ? AND user_id = ?",
             [site_id_new, site_id_curr]
         ).rowcount
+        # remove old site if no longer used
+        any_old_site_user = cur.execute("SELECT site_id FROM notifications WHERE site_id = ? LIMIT 1", [site_id_curr]).fetchone()
+        if not any_old_site_user:
+            cur.execute("DELETE FROM sites WHERE id = ?", [site_id_curr])
         DB.commit_release()
     except Exception as ex:
         DB.rollback_release()
@@ -572,30 +581,137 @@ def cmd_mode(update, context):
     if try_change_mode_for_notification(update.message, uid, site_id, url, freq, diff_mode): return
     cur = DB.aquire()
     try:
-        res = cur.execute("SELECT COUNT(*) FROM notifications WHERE site_id = ?", [site_id]).fetchone()
-        if res[0] == 1:
-            res = cur.execute(
-                "UPDATE sites SET mode = ? , hash = ? WHERE id = ?",
-                [diff_mode.to_int(), hash, site_id]
-            ).rowcount
-            assert(res == 1)
-        else:
+        old_site_user_count = cur.execute("SELECT COUNT(*) FROM notifications WHERE site_id = ?", [site_id]).fetchone()[0]
+        if old_site_user_count == 1:
+            # if nobody else uses the old site, change it over to the new mode
             cur.execute(
-                "INSERT INTO sites(url, mode, hash, seed) VALUES (?,?,?,?)",
-                [url, diff_mode.to_int(), hash, random_seed()]
+                "UPDATE sites SET mode = ?, hash = ? WHERE id = ?",
+                [diff_mode.to_int(), hash, site_id]
+            )
+        else:
+            # if the old site is used by somebody else we have to create a new one
+            cur.execute(
+                "INSERT INTO sites(url, mode, frequency, hash, seed) VALUES (?,?,?,?,?)",
+                [url, diff_mode.to_int(), freq, hash, random_seed()]
             )
             site_id_new = get_site_id(cur, url, diff_mode, freq)
             assert(site_id_new)
             cur.execute(
                 "UPDATE notifications SET site_id = ? WHERE site_id = ? AND user_id = ?",
                 [site_id_new, site_id, uid]
-            ).rowcount
+            )
         DB.commit_release()
     except Exception as ex:
         DB.rollback_release()
         raise ex
 
     reply_to_msg(update.message, True, f'successfully changed mode')
+
+def cmd_frequency(update, context):
+    global DB
+    global UPDATE_FREQUENCIES
+    cmd = "/frequency"
+    args = update.message.text
+    assert(args[0:len(cmd)] == cmd)
+    args = args[len(cmd):].strip()
+    id_str = args.split()[0]
+    try:
+        site_id = int(id_str)
+    except Exception as ex:
+        reply_to_msg(update.message, True, f"invalid <id> '{cutoff(id_str, max_len=100)}'")
+        return
+
+    freq_str = args[len(id_str):].strip()
+    if freq_str not in UPDATE_FREQUENCIES:
+        reply_to_msg(
+            update.message, True,
+            f"unknown <frequency> '{cutoff(freq_str, max_len=100)}'"
+        )
+        return
+
+    freq_new = UPDATE_FREQUENCIES[freq_str]
+
+    cur = DB.aquire()
+    try:
+        uid = get_user_id(update.message)
+        site_to_change = cur.execute(
+            "SELECT url, mode, frequency, hash FROM notifications INNER JOIN sites ON id = site_id WHERE site_id = ? AND user_id = ?",
+            [site_id, uid]
+        ).fetchone()
+    except Exception as ex:
+        DB.release()
+        raise ex
+
+    if not site_to_change:
+        DB.release()
+        reply_to_msg(update.message, True, f'no site with that id present')
+        return
+
+    url, mode, freq, hash = site_to_change
+    mode = DiffMode.from_int(mode)
+    if freq_new == freq:
+        reply_to_msg(update.message, True, f'site is already updating with this frequency')
+        return
+
+    cur = DB.aquire()
+    try:
+        site_id_new = get_site_id(cur, url, mode, freq_new)
+        if site_id_new:
+            notif_to_new_site = cur.execute(
+                "SELECT site_id FROM notifications WHERE site_id = ? AND user_id = ?",
+                [site_id_new, uid]
+            ).fetchone()
+    except Exception as ex:
+        DB.release()
+        raise ex
+
+    if site_id_new and notif_to_new_site:
+        cur = DB.release()
+        reply_to_msg(
+            update.message, True,
+            f'already tracking this url with frequency {UPDATE_FREQUENCY_NAMES[freq_new]} with id {site_id_new}',
+        )
+        return
+
+    if site_id_new:
+        try:
+            cur.execute(
+                "UPDATE notifications SET site_id = ? WHERE site_id = ? AND user_id = ?",
+                [site_id_new, site_id, uid]
+            )
+            any_old_site_user = cur.execute("SELECT site_id FROM notifications WHERE site_id = ? LIMIT 1", [site_id]).fetchone()
+            if not any_old_site_user:
+                cur.execute("DELETE FROM sites WHERE id = ?", [site_id])
+            DB.commit_release()
+        except Exception as ex:
+            DB.release()
+            raise ex
+    else:
+        try:
+            old_site_user_count = cur.execute("SELECT COUNT(*) FROM notifications WHERE site_id = ?", [site_id]).fetchone()[0]
+            if old_site_user_count == 1:
+                # if nobody else uses the old site, change it over to the new frequency
+                cur.execute(
+                    "UPDATE sites SET frequency = ? WHERE id = ?",
+                    [freq_new, site_id]
+                )
+            else:
+                # if the old site is used by somebody else we have to create a new one
+                cur.execute(
+                    "INSERT INTO sites(url, mode, frequency, hash, seed) VALUES (?,?,?,?,?)",
+                    [url, mode.to_int(), freq_new, hash, random_seed()]
+                )
+                site_id_new = get_site_id(cur, url, mode, freq_new)
+                assert(site_id_new)
+                cur.execute(
+                    "UPDATE notifications SET site_id = ? WHERE site_id = ? AND user_id = ?",
+                    [site_id_new, site_id, uid]
+                )
+            DB.commit_release()
+        except Exception as ex:
+            DB.rollback_release()
+            raise ex
+    reply_to_msg(update.message, True, f'successfully changed update frequency')
 
 def inform_site_changed(site_id, mode, new_hash):
     global DB
@@ -717,6 +833,7 @@ def setup_tg_bot():
     dp.add_handler(CommandHandler('add', cmd_add))
     dp.add_handler(CommandHandler('remove', cmd_remove))
     dp.add_handler(CommandHandler('mode', cmd_mode))
+    dp.add_handler(CommandHandler('frequency', cmd_frequency))
 
     BOT.start_polling()
 
