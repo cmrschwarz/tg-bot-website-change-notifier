@@ -653,7 +653,6 @@ def cmd_frequency(update, context):
         reply_to_msg(update.message, True, f'site is already updating with this frequency')
         return
 
-    cur = DB.aquire()
     try:
         site_id_new = get_site_id(cur, url, mode, freq_new)
         if site_id_new:
@@ -752,12 +751,14 @@ def poll_site(site_id, url, mode, freq, old_hash):
                     ORDER BY frequency DESC
                     LIMIT 1
             """,
-            [url, mode, freq]
+            [url, mode.to_int(), freq]
         ).fetchone()
     finally:
         DB.release()
 
-    if not new_hash:
+    if new_hash:
+        new_hash = new_hash[0]
+    else:
         new_hash = get_site_hash(url, mode)
     if old_hash == new_hash: return
 
