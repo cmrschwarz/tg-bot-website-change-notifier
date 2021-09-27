@@ -471,13 +471,14 @@ def cmd_remove(update, context):
             DB.release()
             reply_to_msg(update.message, True, f'no site with that id present')
             return
-        res = cur.execute("SELECT COUNT(*) FROM notifications WHERE site_id = ?", [rm_id]).fetchall()
-        if res[0][0] == 0:
+        assert(res == 1)
+        res = cur.execute("SELECT COUNT(*) FROM notifications WHERE site_id = ?", [rm_id]).fetchone()
+        if res[0] == 0:
             cur.execute("DELETE FROM sites WHERE id = ?", [rm_id])
+        DB.commit_release()
     except Exception as ex:
         DB.rollback_release()
         raise ex
-    DB.commit_release()
     reply_to_msg(update.message, True, f'site removed')
 
 def get_site_id(cur, url, mode, freq):
@@ -559,41 +560,41 @@ def cmd_mode(update, context):
 
     if try_change_mode_for_notification(update.message, uid, site_id, url, freq, diff_mode): return
 
-    if not res:
-        DB.release()
-        hash = get_site_hash(url, diff_mode)
-        if not hash:
-            reply_to_msg(
-                update.message, True,
-                f'error while loading the page, refusing to change mode',
-            )
-            return
+    DB.release()
+    hash = get_site_hash(url, diff_mode)
+    if not hash:
+        reply_to_msg(
+            update.message, True,
+            f'error while loading the page, refusing to change mode',
+        )
+        return
 
-        if try_change_mode_for_notification(update.message, uid, site_id, url, freq, diff_mode): return
-        cur = DB.aquire()
-        try:
-            res = cur.execute("SELECT COUNT(*) FROM notifications WHERE site_id = ?", [site_id]).fetchone()
-            if res[0] == 1:
-                res = cur.execute(
-                    "UPDATE sites SET mode = ? , hash = ? WHERE id = ?",
-                    [diff_mode.to_int(), hash, site_id]
-                ).rowcount
-                assert(res == 1)
-            else:
-                cur.execute(
-                    "INSERT INTO sites(url, mode, hash, seed) VALUES (?,?,?,?)",
-                    [url, diff_mode.to_int(), hash, random_seed()]
-                )
-                site_id_new = get_site_id(cur, url, diff_mode, freq)
-                assert(site_id_new)
-                cur.execute(
-                    "UPDATE notifications SET site_id = ? WHERE site_id = ? AND user_id = ?",
-                    [site_id_new, site_id, uid]
-                ).rowcount
-        except Exception as ex:
-            DB.rollback_release()
-            raise ex
-    DB.commit_release()
+    if try_change_mode_for_notification(update.message, uid, site_id, url, freq, diff_mode): return
+    cur = DB.aquire()
+    try:
+        res = cur.execute("SELECT COUNT(*) FROM notifications WHERE site_id = ?", [site_id]).fetchone()
+        if res[0] == 1:
+            res = cur.execute(
+                "UPDATE sites SET mode = ? , hash = ? WHERE id = ?",
+                [diff_mode.to_int(), hash, site_id]
+            ).rowcount
+            assert(res == 1)
+        else:
+            cur.execute(
+                "INSERT INTO sites(url, mode, hash, seed) VALUES (?,?,?,?)",
+                [url, diff_mode.to_int(), hash, random_seed()]
+            )
+            site_id_new = get_site_id(cur, url, diff_mode, freq)
+            assert(site_id_new)
+            cur.execute(
+                "UPDATE notifications SET site_id = ? WHERE site_id = ? AND user_id = ?",
+                [site_id_new, site_id, uid]
+            ).rowcount
+        DB.commit_release()
+    except Exception as ex:
+        DB.rollback_release()
+        raise ex
+
     reply_to_msg(update.message, True, f'successfully changed mode')
 
 def inform_site_changed(site_id, mode, new_hash):
