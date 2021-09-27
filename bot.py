@@ -7,12 +7,11 @@ from textwrap import dedent, indent
 import requests
 import json
 import base64
+from enum import Enum
 import hashlib
 import datetime
 import threading
-import telegram #pip3 install python-telegram-bot
 import imgkit
-import urllib
 import time
 import random
 import sqlite3
@@ -23,11 +22,11 @@ from url_normalize import url_normalize
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
 
-from enum import Enum
-from telegram import (MessageEntity, ParseMode, InlineKeyboardButton)
+import telegram #pip3 install python-telegram-bot
+from telegram import (MessageEntity, InlineKeyboardButton)
 from telegram.constants import MESSAGEENTITY_URL
-from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters,
-                          PollAnswerHandler)
+from telegram.ext import (Updater, CommandHandler, CallbackQueryHandler)
+from telegram.inline.inlinekeyboardmarkup import InlineKeyboardMarkup
 
 class DiffMode(Enum):
     HTML = (0, "html")
@@ -47,6 +46,29 @@ class DiffMode(Enum):
     def from_string(s):
         s = s.lower()
         for dm in DiffMode:
+            if dm.to_string() == s:
+                return dm
+
+class UserState(Enum):
+    UNAUTHORIZED = (0, "unauthorized")
+    AUTHORIZED = (1, "authorized")
+    ADMIN = (2, "admin")
+    BLOCKED = (3, "blocked")
+
+    def to_string(self):
+        return self.value[1]
+
+    def to_int(self):
+        return self.value[0]
+
+    def from_int(i):
+        for dm in UserState:
+            if dm.to_int() == i:
+                return dm
+
+    def from_string(s):
+        s = s.lower()
+        for dm in UserState:
             if dm.to_string() == s:
                 return dm
 
@@ -182,32 +204,88 @@ def random_seed():
     global INT_MAX
     return random.randint(0, INT_MAX)
 
-def get_user_id(message):
+def pretty_name(name, is_group):
+    return f"group '{name}'" if is_group else f"@{name}"
+
+def get_user_id(message, need_admin=False):
+    #todo update changed usernames
     global DB
+    global BOT
     chat_id = message.chat.id
-    is_group = (message.from_user is None)
+    is_group = (message.from_user is None or message.from_user.id != chat_id)
+    if is_group:
+        name = message.chat.title
+    else:
+        name = message.from_user.username
 
     cur = DB.aquire()
     try:
         select_query = lambda: cur.execute(
-            "SELECT id FROM users WHERE tg_chat_id = ?",
+            "SELECT id, name, state FROM users WHERE tg_chat_id = ?",
             [chat_id]
         ).fetchone()
         res = select_query()
+        id = None
         if res:
             DB.release()
-        else:
-            cur.execute(
-                "INSERT INTO users (tg_chat_id, is_group) VALUES (?,?)",
-                [chat_id, is_group]
-            )
-            res = select_query()
-            DB.commit_release()
+            id, db_name, state = res
+            #todo: update name
+            assert(db_name == name)
+            state = UserState.from_int(state)
+            if state == UserState.BLOCKED: return None
+            if need_admin and state != UserState.ADMIN: return None
+            if state != UserState.UNAUTHORIZED: return id
+
+        if not id:
+            if is_admin_message(message):
+                assert(not is_group)
+                cur.execute(
+                    "INSERT INTO users (tg_chat_id, name, is_group, state) VALUES (?,?,?,?)",
+                    [chat_id, name, is_group, UserState.ADMIN.to_int()]
+                )
+                res = select_query()
+                DB.commit_release()
+                return res[0]
+            else:
+                if need_admin:
+                    DB.release()
+                    return None
+                cur.execute(
+                    "INSERT INTO users (tg_chat_id, name, is_group, state) VALUES (?,?,?,?)",
+                    [chat_id, name, is_group, UserState.UNAUTHORIZED.to_int()]
+                )
+                id, name, state = select_query()
+                DB.commit_release()
     except Exception as ex:
         DB.rollback_release()
         raise ex
 
-    return res[0]
+    reply_to_msg(message, True, "unauthorized")
+
+    cur = DB.aquire()
+    try:
+        res = cur.execute("SELECT tg_chat_id FROM users WHERE state = ?", [UserState.ADMIN.to_int()])
+        while True:
+            next = res.fetchone()
+            if not next: break
+
+            BOT.bot.send_message(
+                next[0],
+                f"Do you want to authorize {pretty_name(name, is_group)} (chat id {chat_id}) ?",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton("Authorize", callback_data="/authorize " + str(id)),
+                            InlineKeyboardButton("Deny", callback_data="/deny " + str(id)),
+                            InlineKeyboardButton("Block", callback_data="/block " + str(id)),
+                        ]
+                    ]
+                )
+            )
+    except Exception as ex:
+        DB.rollback_release()
+        raise ex
+
 
 def cmd_start(update, context):
     reply_to_msg(update.message, True, "Hello! Please use /help for a list of commands.")
@@ -216,20 +294,28 @@ def pad(str, length, pad_char=" "):
     assert(length > len(str) and len(pad_char) == 1)
     return str + pad_char * (length - len(str))
 
+def insert_at_heading(str, heading, insert, after=True):
+    insert_pos = str.find(heading)
+    if after:
+        insert_pos += len(heading)
+    return str[:insert_pos] + insert + str[insert_pos:]
+
+def is_admin_message(message):
+    global ADMIN_USER_NAMES
+    if not message.from_user or message.from_user.id != message.chat.id: return False
+    return message.from_user.username in ADMIN_USER_NAMES
+
 def cmd_help(update, context):
+    uid = get_user_id(update.message)
+    if not uid: return
+
+    global ADMIN_USER_NAMES
     global DEFAULT_DIFF_MODE
     global DEFAULT_UPDATE_FREQUENCY
     global MAX_SITES_PER_USER
     global MAX_URL_LEN
     global UPDATE_FREQUENCIES
     default_mode = lambda mode: "(default)" if (mode == DEFAULT_DIFF_MODE) else ""
-
-    first_column_width = 33
-    frequency_listing = ""
-
-
-    for (name, freq) in UPDATE_FREQUENCIES.items():
-        frequency_listing += pad(" " * 4 + f"{name} ", first_column_width) + f"{freq} s" + (" (default)" if freq == DEFAULT_UPDATE_FREQUENCY else "") + "\n"
 
     text = f"""\
         COMMANDS:
@@ -252,16 +338,55 @@ def cmd_help(update, context):
 
     """
     text = dedent(text)
-    freq_str = "FREQUENCIES:\n"
-    freq_str_end_pos = text.find(freq_str) + len(freq_str)
-    text = text[:freq_str_end_pos] + frequency_listing + text[freq_str_end_pos:]
+
+    first_column_width = (
+        text.find("print this menu") - text.find("/help")
+        + len("/help")
+        + str(reversed(text[:text.find("/help")])).find("\n")
+    )
+
+    frequency_listing = ""
+    for (name, freq) in UPDATE_FREQUENCIES.items():
+        frequency_listing += pad(" " * 4 + f"{name} ", first_column_width) + f"{freq} s" + (" (default)" if freq == DEFAULT_UPDATE_FREQUENCY else "") + "\n"
+
+    text = insert_at_heading(text, "FREQUENCIES:\n", frequency_listing)
+    if is_admin_message(update.message):
+        text = insert_at_heading(
+            text, "MODES",
+            dedent(
+                """\
+                ADMIN COMMANDS:
+                    /listusers                       list all users
+                    /allowuser <user id>             allow this username to use the bot
+                    /blockuser <user id>             block all future access requests form this user
+                    /resetuser @<telegram_username>  remove a user from the user list
+                    /listall                         list all tracked sites
+                    /siteinfo <id>                   list all users using a site and the respective modes
+
+                """
+            ),
+            after=False
+        )
+
     reply_to_msg(update.message, True, text, monospaced=True)
+
+def cmd_whoami(update, context):
+    uid = get_user_id(update.message)
+    if not uid: return
+
+    response = ""
+    if update.message.from_user:
+        response += f"user id: {update.message.from_user.id}\n"
+    response += f"chat id: {update.message.chat.id}\n"
+    reply_to_msg(update.message, True, response, monospaced=True)
 
 
 def cmd_list(update, context):
+    uid = get_user_id(update.message)
+    if not uid: return
+
     cur = DB.aquire()
     try:
-        uid = get_user_id(update.message)
         sites = cur.execute(
             """
                 SELECT id, url, mode, frequency
@@ -361,6 +486,9 @@ def cmd_add(update, context):
     global MAX_SITES_PER_USER
     global DEFAULT_UPDATE_FREQUENCY
     global UPDATE_FREQUENCY_NAMES
+    uid = get_user_id(update.message)
+    if not uid: return
+
     url = update.message.text
     try:
         cmd = "/add"
@@ -376,7 +504,6 @@ def cmd_add(update, context):
 
     cur = DB.aquire()
     try:
-        uid = get_user_id(update.message)
         res = cur.execute("SELECT COUNT(*) FROM notifications WHERE user_id = ?", [uid]).fetchone()
         if res[0] >= MAX_SITES_PER_USER:
             reply_to_msg(
@@ -454,6 +581,9 @@ def cmd_add(update, context):
 
 def cmd_remove(update, context):
     global DB
+    uid = get_user_id(update.message)
+    if not uid: return
+
     cmd = "/remove"
     rm_id_str = update.message.text
     assert(rm_id_str[0:len(cmd)] == cmd)
@@ -526,6 +656,9 @@ def try_change_mode_for_notification(message, user_id, site_id_curr, url, freq, 
     return True
 
 def cmd_mode(update, context):
+    uid = get_user_id(update.message)
+    if not uid: return
+
     global DB
     cmd = "/mode"
     args = update.message.text
@@ -549,7 +682,6 @@ def cmd_mode(update, context):
 
     cur = DB.aquire()
     try:
-        uid = get_user_id(update.message)
         res = cur.execute(
             "SELECT url, mode, frequency FROM notifications INNER JOIN sites ON id = site_id WHERE site_id = ? AND user_id = ?",
             [site_id, uid]
@@ -609,6 +741,9 @@ def cmd_mode(update, context):
     reply_to_msg(update.message, True, f'successfully changed mode')
 
 def cmd_frequency(update, context):
+    uid = get_user_id(update.message)
+    if not uid: return
+
     global DB
     global UPDATE_FREQUENCIES
     cmd = "/frequency"
@@ -712,6 +847,48 @@ def cmd_frequency(update, context):
             DB.rollback_release()
             raise ex
     reply_to_msg(update.message, True, f'successfully changed update frequency')
+
+def authorization_callback(update, cb_cmd, target_state, action_name):
+    global ADMIN_USER_NAMES
+    global DB
+    if update.callback_query.from_user.username not in ADMIN_USER_NAMES: return
+    arg = str(update.callback_query.data)[len(cb_cmd):].strip()
+    id = int(arg)
+    try:
+        cur = DB.aquire()
+        res = cur.execute("SELECT name, is_group, state FROM users  WHERE id = ?", [id]).fetchone()
+    except Exception as ex:
+        DB.rollback_release()
+        raise ex
+
+    if res:
+        name, is_group, state = res
+        state = UserState.from_int(state)
+    if not res:
+        DB.release()
+        update.callback_query.answer(f"outdated procedure!")
+    elif state != UserState.UNAUTHORIZED:
+        DB.release()
+        update.callback_query.answer(f"outdated procedure! {pretty_name(name, is_group)} is currently {state.to_string()}")
+    else:
+        try:
+            cur.execute("UPDATE users SET state = ? WHERE id = ?", [target_state.to_int(), id])
+            DB.commit_release()
+        except Exception as ex:
+            DB.rollback_release()
+            raise ex
+        reply_to_msg(update.callback_query.message, False, f"{action_name} {pretty_name(name, is_group)}")
+    update.callback_query.edit_message_reply_markup()
+
+
+def cb_authorize(update, context):
+    authorization_callback(update, "/authorize", UserState.AUTHORIZED, "authorized")
+
+def cb_block(update, context):
+    authorization_callback(update, "/block", UserState.BLOCKED, "blocked")
+
+def cb_deny(update, context):
+    authorization_callback(update, "/block", UserState.UNAUTHORIZED, "denied")
 
 def inform_site_changed(site_id, mode, new_hash):
     global DB
@@ -836,7 +1013,10 @@ def setup_tg_bot():
     dp.add_handler(CommandHandler('remove', cmd_remove))
     dp.add_handler(CommandHandler('mode', cmd_mode))
     dp.add_handler(CommandHandler('frequency', cmd_frequency))
-
+    dp.add_handler(CommandHandler('whoami', cmd_whoami))
+    dp.add_handler(CallbackQueryHandler(cb_authorize, pattern="^/authorize"))
+    dp.add_handler(CallbackQueryHandler(cb_deny, pattern="^/deny"))
+    dp.add_handler(CallbackQueryHandler(cb_block, pattern="^/block"))
     BOT.start_polling()
 
 def setup_db():
@@ -848,7 +1028,9 @@ def setup_db():
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER NOT NULL PRIMARY KEY,
             tg_chat_id INTEGER NOT NULL UNIQUE,
-            is_group BOOLEAN
+            name TEXT,
+            is_group BOOLEAN NOT NULL,
+            state INTEGER NOT NULL
         );
     """)
     cur.execute("""
@@ -941,6 +1123,12 @@ def setup_config():
 
     global DEFAULT_UPDATE_FREQUENCY
     DEFAULT_UPDATE_FREQUENCY = UPDATE_FREQUENCIES[CONFIG["default_update_frequency"]]
+
+    global ADMIN_USER_NAMES
+    ADMIN_USER_NAMES = []
+    for user in CONFIG["admin_user_names"]:
+        assert(isinstance(user, str))
+        ADMIN_USER_NAMES.append(str(user))
 
     global TIMESTEP
     TIMESTEP = lcm(*UPDATE_FREQUENCIES.values())

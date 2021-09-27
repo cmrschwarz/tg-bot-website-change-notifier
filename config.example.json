@@ -1,5 +1,6 @@
 {
     "bot_token": "<your bot token here>",
+    "admin_user_names": ["<your admin user name here>"],
     "max_sites_per_user": 5,
     "default_diff_mode": "html",
     "max_url_len": -1,
