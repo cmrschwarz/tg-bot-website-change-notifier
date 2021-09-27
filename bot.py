@@ -347,7 +347,12 @@ def cmd_help(update, context):
 
     frequency_listing = ""
     for (name, freq) in UPDATE_FREQUENCIES.items():
-        frequency_listing += pad(" " * 4 + f"{name} ", first_column_width) + f"{freq} s" + (" (default)" if freq == DEFAULT_UPDATE_FREQUENCY else "") + "\n"
+        frequency_listing += (
+            pad(" " * 4 + f"{name} ", first_column_width)
+            + f"{freq} s"
+            + (" (default)" if freq == DEFAULT_UPDATE_FREQUENCY else "")
+            + "\n"
+        )
 
     text = insert_at_heading(text, "FREQUENCIES:\n", frequency_listing)
     if is_admin_message(update.message):
@@ -357,9 +362,7 @@ def cmd_help(update, context):
                 """\
                 ADMIN COMMANDS:
                     /listusers                       list all users
-                    /allowuser <user id>             allow this username to use the bot
-                    /blockuser <user id>             block all future access requests form this user
-                    /resetuser @<telegram_username>  remove a user from the user list
+                    /userstate <user id> <state>     change the state for a user
                     /listall                         list all tracked sites
                     /siteinfo <id>                   list all users using a site and the respective modes
 
@@ -379,6 +382,30 @@ def cmd_whoami(update, context):
         response += f"user id: {update.message.from_user.id}\n"
     response += f"chat id: {update.message.chat.id}\n"
     reply_to_msg(update.message, True, response, monospaced=True)
+
+def cmd_listusers(update, context):
+    uid = get_user_id(update.message, need_admin=True)
+    if not uid: return
+
+    reply_to_msg(update.message, True, "not implemented yet :/")
+
+def cmd_listall(update, context):
+    uid = get_user_id(update.message, need_admin=True)
+    if not uid: return
+
+    reply_to_msg(update.message, True, "not implemented yet :/")
+
+def cmd_userstate(update, context):
+    uid = get_user_id(update.message, need_admin=True)
+    if not uid: return
+
+    reply_to_msg(update.message, True, "not implemented yet :/")
+
+def cmd_siteinfo(update, context):
+    uid = get_user_id(update.message, need_admin=True)
+    if not uid: return
+
+    reply_to_msg(update.message, True, "not implemented yet :/")
 
 
 def cmd_list(update, context):
@@ -645,7 +672,10 @@ def try_change_mode_for_notification(message, user_id, site_id_curr, url, freq, 
             [site_id_new, site_id_curr]
         ).rowcount
         # remove old site if no longer used
-        any_old_site_user = cur.execute("SELECT site_id FROM notifications WHERE site_id = ? LIMIT 1", [site_id_curr]).fetchone()
+        any_old_site_user = cur.execute(
+            "SELECT site_id FROM notifications WHERE site_id = ? LIMIT 1",
+            [site_id_curr]
+        ).fetchone()
         if not any_old_site_user:
             cur.execute("DELETE FROM sites WHERE id = ?", [site_id_curr])
         DB.commit_release()
@@ -1014,6 +1044,10 @@ def setup_tg_bot():
     dp.add_handler(CommandHandler('mode', cmd_mode))
     dp.add_handler(CommandHandler('frequency', cmd_frequency))
     dp.add_handler(CommandHandler('whoami', cmd_whoami))
+    dp.add_handler(CommandHandler('listusers', cmd_listusers))
+    dp.add_handler(CommandHandler('listall', cmd_listall))
+    dp.add_handler(CommandHandler('userstate', cmd_userstate))
+    dp.add_handler(CommandHandler('siteinfo', cmd_siteinfo))
     dp.add_handler(CallbackQueryHandler(cb_authorize, pattern="^/authorize"))
     dp.add_handler(CallbackQueryHandler(cb_deny, pattern="^/deny"))
     dp.add_handler(CallbackQueryHandler(cb_block, pattern="^/block"))
