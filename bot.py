@@ -881,6 +881,13 @@ def setup_db():
     DB.release()
     assert(frequency_check[0] == 0)
 
+# lowest common multiple. not present in math before python 3.9
+def lcm(*integers):
+    lcm = 1
+    for i in integers:
+        lcm = (lcm * i) // math.gcd(lcm, i)
+    return lcm
+
 def setup_config():
     global INT_MAX
     INT_MAX = 2**31 - 1
@@ -936,7 +943,7 @@ def setup_config():
     DEFAULT_UPDATE_FREQUENCY = UPDATE_FREQUENCIES[CONFIG["default_update_frequency"]]
 
     global TIMESTEP
-    TIMESTEP = math.lcm(*UPDATE_FREQUENCIES.values())
+    TIMESTEP = lcm(*UPDATE_FREQUENCIES.values())
     assert(TIMESTEP < INT_MAX)
 
 if __name__ == '__main__':
