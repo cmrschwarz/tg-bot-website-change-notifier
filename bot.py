@@ -218,17 +218,18 @@ def pad(str, length, pad_char=" "):
 
 def cmd_help(update, context):
     global DEFAULT_DIFF_MODE
+    global DEFAULT_UPDATE_FREQUENCY
     global MAX_SITES_PER_USER
     global MAX_URL_LEN
     global UPDATE_FREQUENCIES
-    default_tag = lambda mode: "(default)" if (mode == DEFAULT_DIFF_MODE) else ""
+    default_mode = lambda mode: "(default)" if (mode == DEFAULT_DIFF_MODE) else ""
 
     first_column_width = 33
     frequency_listing = ""
 
 
     for (name, freq) in UPDATE_FREQUENCIES.items():
-        frequency_listing += pad(" " * 4 + f"{name} ", first_column_width) + f"{freq} s\n"
+        frequency_listing += pad(" " * 4 + f"{name} ", first_column_width) + f"{freq} s" + (" (default)" if freq == DEFAULT_UPDATE_FREQUENCY else "") + "\n"
 
     text = f"""\
         COMMANDS:
@@ -240,8 +241,8 @@ def cmd_help(update, context):
             /frequency <id> <frequency>  change the update frequency for a site
 
         MODES:
-            render                       the diff is based on an image of the site rendered using imgkit {default_tag(DiffMode.RENDER)}
-            html                         the diff is based on the raw html of the site {default_tag(DiffMode.HTML)}
+            render                       the diff is based on an image of the site rendered using imgkit {default_mode(DiffMode.RENDER)}
+            html                         the diff is based on the raw html of the site {default_mode(DiffMode.HTML)}
 
         FREQUENCIES:
 
@@ -395,7 +396,7 @@ def cmd_add(update, context):
         if not hash:
             reply_to_msg(
                 update.message, True,
-                f'error while loading the page, refusing to track this url',
+                f"error while loading the page, refusing to track {url}",
             )
             return
         cur = DB.aquire()

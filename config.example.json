@@ -1,8 +1,14 @@
 {
-    "bot_token": "<Your bot Token Here>",
-    "update_interval_seconds": 3600,
-    "max_sites_per_user": 100,
+    "bot_token": "<your bot token here>",
+    "max_sites_per_user": 5,
     "default_diff_mode": "html",
     "max_url_len": -1,
-    "num_worker_threads": 16
+    "num_worker_threads": 16,
+    "update_frequencies_seconds": {
+        "daily": 86400,
+        "hourly": 3600,
+        "minutely": 60,
+        "rapid": 10
+    },
+    "default_update_frequency": "hourly"
 }
