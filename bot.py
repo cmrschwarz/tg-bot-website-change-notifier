@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+from codecs import replace_errors
 from math import ceil
 from re import match
 from sqlite3 import dbapi2
@@ -466,21 +467,38 @@ def cmd_remove(update, context):
     DB.commit_release()
     reply_to_msg(update.message, True, f'site removed')
 
-def update_notification_site(message, cursor, user_id, site_id_old, site_id_new, mode_new):
-    res = cursor.execute(
-        "SELECT site_id FROM notifications WHERE site_id = ? AND user_id = ?",
-        [site_id_new, user_id]
+def get_site_id(cur, url, mode, freq):
+    res = cur.execute(
+        "SELECT id FROM sites WHERE url = ? AND mode = ? AND frequency = ?",
+        [url, mode.to_int(), freq]
     ).fetchone()
-    if res:
-        reply_to_msg(
-            message, True,
-            f'already tracking this url in {mode_new.to_string()} mode with id {res[0]}',
-        )
-        return False
-    cursor.execute(
-        "UPDATE notifications SET site_id = ? WHERE site_id = ? AND user_id = ?",
-        [site_id_new, site_id_old]
-    ).rowcount
+    return res[0] if res else None
+
+def try_change_mode_for_notification(message, user_id, site_id_curr, url, freq, mode_new):
+    global DB
+    cur = DB.aquire()
+    try:
+        site_id_new = get_site_id(cur, url, mode_new, freq)
+        if not site_id_new: return False
+        res = cur.execute(
+            "SELECT site_id FROM notifications WHERE site_id = ? AND user_id = ?",
+            [site_id_new, user_id]
+        ).fetchone()
+        if res:
+            reply_to_msg(
+                message, True,
+                f'already tracking this url in {mode_new.to_string()} mode with id {res[0]}',
+            )
+            return True
+        cur.execute(
+            "UPDATE notifications SET site_id = ? WHERE site_id = ? AND user_id = ?",
+            [site_id_new, site_id_curr]
+        ).rowcount
+        DB.commit_release()
+    except Exception as ex:
+        DB.rollback_release()
+        raise ex
+
     return True
 
 def cmd_mode(update, context):
@@ -509,7 +527,7 @@ def cmd_mode(update, context):
     try:
         uid = get_user_id(update.message)
         res = cur.execute(
-            "SELECT url, mode FROM notifications INNER JOIN sites ON id = site_id WHERE site_id = ? AND user_id = ?",
+            "SELECT url, mode, frequency FROM notifications INNER JOIN sites ON id = site_id WHERE site_id = ? AND user_id = ?",
             [site_id, uid]
         ).fetchone()
     except Exception as ex:
@@ -521,25 +539,12 @@ def cmd_mode(update, context):
         reply_to_msg(update.message, True, f'no site with that id present')
         return
 
-    url, mode = res
+    url, mode, freq = res
     if mode == diff_mode.to_int():
         reply_to_msg(update.message, True, f'site is already in this mode')
         return
 
-    search_for_tgt_site = lambda: (
-        cur.execute(
-            "SELECT id FROM sites WHERE url = ? AND mode = ?",
-            [url, diff_mode.to_int()]
-        ).fetchone()
-    )
-
-    try:
-        res = search_for_tgt_site()
-        if res:
-            if not update_notification_site(update.message, cur, uid, site_id, res[0], diff_mode): return
-    except Exception as ex:
-        DB.rollback_release()
-        raise ex
+    if try_change_mode_for_notification(update.message, uid, site_id, url, freq, diff_mode): return
 
     if not res:
         DB.release()
@@ -550,70 +555,90 @@ def cmd_mode(update, context):
                 f'error while loading the page, refusing to change mode',
             )
             return
+
+        if try_change_mode_for_notification(update.message, uid, site_id, url, freq, diff_mode): return
         cur = DB.aquire()
         try:
-            res = search_for_tgt_site()
-            if res:
-                if not update_notification_site(update.message, cur, uid, site_id, res[0], diff_mode): return
+            res = cur.execute("SELECT COUNT(*) FROM notifications WHERE site_id = ?", [site_id]).fetchone()
+            if res[0] == 1:
+                res = cur.execute(
+                    "UPDATE sites SET mode = ? , hash = ? WHERE id = ?",
+                    [diff_mode.to_int(), hash, site_id]
+                ).rowcount
+                assert(res == 1)
             else:
-                res = cur.execute("SELECT COUNT(*) FROM notifications WHERE site_id = ?", [site_id]).fetchone()
-                if res[0] == 1:
-                    res = cur.execute(
-                        "UPDATE sites SET mode = ? , hash = ? WHERE id = ?",
-                        [diff_mode.to_int(), hash, site_id]
-                    ).rowcount
-                    assert(res == 1)
-                else:
-                    cur.execute(
-                        "INSERT INTO sites(url, mode, hash, seed) VALUES (?,?,?,?)",
-                        [url, diff_mode.to_int(), hash, random_seed()]
-                    )
-                    res = search_for_tgt_site()
-                    assert(res)
-                    cur.execute(
-                        "UPDATE notifications SET site_id = ? WHERE site_id = ? AND user_id = ?",
-                        [res[0], site_id, uid]
-                    ).rowcount
+                cur.execute(
+                    "INSERT INTO sites(url, mode, hash, seed) VALUES (?,?,?,?)",
+                    [url, diff_mode.to_int(), hash, random_seed()]
+                )
+                site_id_new = get_site_id(cur, url, diff_mode, freq)
+                assert(site_id_new)
+                cur.execute(
+                    "UPDATE notifications SET site_id = ? WHERE site_id = ? AND user_id = ?",
+                    [site_id_new, site_id, uid]
+                ).rowcount
         except Exception as ex:
             DB.rollback_release()
             raise ex
     DB.commit_release()
-
-
     reply_to_msg(update.message, True, f'successfully changed mode')
 
 def inform_site_changed(site_id, mode, new_hash):
     global DB
     global BOT
-    cur = DB.aquire()
-    cur.execute("""
-        SELECT tg_chat_id, url
-            FROM notifications
-            INNER JOIN sites ON notifications.site_id = sites.id
-            INNER JOIN users ON notifications.user_id = users.id
-            WHERE sites.id = ?
-        """,
-        [site_id]
-    )
-    while True:
-        res = cur.fetchone()
-        if not res: break
-        tg_chat_id, url = res
-        if new_hash:
-            msg = cutoff("site changed:\n" + url)
-        else:
-            msg = cutoff("site became unavailable:\n" + url)
-        BOT.bot.send_message(tg_chat_id, msg)
-    DB.release()
 
-def poll_site(site_id, url, mode, old_hash):
+    cur = DB.aquire()
+    try:
+        cur.execute("""
+            SELECT tg_chat_id, url
+                FROM notifications
+                INNER JOIN sites ON notifications.site_id = sites.id
+                INNER JOIN users ON notifications.user_id = users.id
+                WHERE sites.id = ?
+            """,
+            [site_id]
+        )
+        while True:
+            res = cur.fetchone()
+            if not res: break
+            tg_chat_id, url = res
+            if new_hash:
+                msg = cutoff("site changed:\n" + url)
+            else:
+                msg = cutoff("site became unavailable:\n" + url)
+            BOT.bot.send_message(tg_chat_id, msg)
+    finally:
+        DB.release()
+
+def poll_site(site_id, url, mode, freq, old_hash):
     global DB
-    new_hash = get_site_hash(url, mode)
+    cur = DB.aquire()
+    try:
+        new_hash = cur.execute(
+            """
+                SELECT hash
+                    FROM sites
+                    WHERE url = ? AND mode = ? AND frequency > ?
+                    ORDER BY frequency DESC
+                    LIMIT 1
+            """,
+            [url, mode, freq]
+        ).fetchone()
+    finally:
+        DB.release()
+
+    if not new_hash:
+        new_hash = get_site_hash(url, mode)
     if old_hash == new_hash: return
 
-    cur = DB.aquire()
-    cur.execute("UPDATE sites SET hash = ? WHERE id = ?", [new_hash, site_id])
-    DB.release()
+    try:
+        cur = DB.aquire()
+        cur.execute("UPDATE sites SET hash = ? WHERE id = ?", [new_hash, site_id])
+        DB.commit_release()
+    except Exception as ex:
+        DB.rollback_release()
+        raise ex
+
     inform_site_changed(site_id, mode, new_hash)
 
 def poll_sites():
@@ -634,7 +659,7 @@ def poll_sites():
         cur = DB.aquire()
         query = cur.execute(
             f"""
-                SELECT id, url, mode, hash, ((seed - ?) % frequency + frequency) % frequency AS delay
+                SELECT id, url, mode, frequency, hash, ((seed - ?) % frequency + frequency) % frequency AS delay
                     FROM sites
                     WHERE delay < ?
                     ORDER BY delay ASC
@@ -644,9 +669,9 @@ def poll_sites():
         while True:
             res = query.fetchone()
             if not res: break
-            site_id, url, mode, hash, _delay = res
+            site_id, url, mode, freq, hash, _delay = res
             mode = DiffMode.from_int(mode)
-            thread_pool.submit(poll_site, site_id, url, mode, hash)
+            thread_pool.submit(poll_site, site_id, url, mode, freq, hash)
         curr_seed = (curr_seed + secs_since_last) % TIMESTEP
         # more compact would be mod(mod(seed - curr_seed, update_interval_secs) + update_interval_secs, update_interval_secs)
         # but not all instances of sqlite3 support the mod function
