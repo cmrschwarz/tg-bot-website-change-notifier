@@ -86,25 +86,6 @@ class Database:
         self.rollback = True
         self.release()
 
-
-global DB
-global CONFIG
-global BOT
-global SCRIPT_DIR_PATH
-global STDIO_SUPPRESSION_FILE
-
-INT_MAX = 2**31 - 1
-# the maximum number of characters before the url in /list
-MAX_URL_PREFIX_LEN = 4 + len(str((INT_MAX))) + 1 + 1 # 4 spaces + id name + colon + space
-# this limit ensures that each line in /list is a clickable url
-MAX_URL_LEN = telegram.MAX_MESSAGE_LENGTH - MAX_URL_PREFIX_LEN
-
-DEFAULT_DIFF_MODE = DiffMode.HTML
-
-MAX_SITES_PER_USER = 100
-
-NUM_WORKER_THREADS = 16
-
 def get_site_hash(url, diff_mode):
     global STDIO_SUPPRESSION_FILE
     try:
@@ -197,6 +178,7 @@ def reply_to_msg(message, explicit_reply, txt, monospaced=False, extra_entities=
     message.reply_text(txt_co, reply_to_message_id=reply_to_message_id, entities=entities, disable_web_page_preview=disable_web_page_preview)
 
 def random_seed():
+    global INT_MAX
     return random.randint(0, INT_MAX)
 
 def get_user_id(message):
@@ -235,7 +217,6 @@ def pad(str, length, pad_char=" "):
 
 def cmd_help(update, context):
     global DEFAULT_DIFF_MODE
-    global UPDATE_INTERVAL_SECONDS
     global MAX_SITES_PER_USER
     global MAX_URL_LEN
     global UPDATE_FREQUENCIES
@@ -264,7 +245,6 @@ def cmd_help(update, context):
         FREQUENCIES:
 
         INSTANCE SETTINGS
-            update interval              {UPDATE_INTERVAL_SECONDS} seconds
             max sites per user           {MAX_SITES_PER_USER}
             max url length               {MAX_URL_LEN}
 
@@ -602,64 +582,6 @@ def cmd_mode(update, context):
 
     reply_to_msg(update.message, True, f'successfully changed mode')
 
-def setup_tg_bot():
-    global CONFIG
-    global BOT
-    BOT = Updater(CONFIG["bot_token"], use_context=True, workers=NUM_WORKER_THREADS)
-
-    dp = BOT.dispatcher
-
-    dp.add_handler(CommandHandler('start', cmd_start))
-    dp.add_handler(CommandHandler('help', cmd_help))
-    dp.add_handler(CommandHandler('list', cmd_list))
-    dp.add_handler(CommandHandler('add', cmd_add))
-    dp.add_handler(CommandHandler('remove', cmd_remove))
-    dp.add_handler(CommandHandler('mode', cmd_mode))
-
-    BOT.start_polling()
-
-def setup_db():
-    global DB
-    global SCRIPT_DIR_PATH
-    DB = Database(SCRIPT_DIR_PATH + "/data.sqlite3")
-    cur = DB.aquire()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER NOT NULL PRIMARY KEY,
-            tg_chat_id INTEGER NOT NULL UNIQUE,
-            is_group BOOLEAN
-        );
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS sites (
-            id INTEGER NOT NULL PRIMARY KEY,
-            url TEXT NOT NULL,
-            mode INTEGER NOT NULL,
-            frequency INTEGER NOT NULL,
-            hash TEXT,
-            seed INTEGER NOT NULL
-        );
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS notifications (
-            site_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            FOREIGN KEY (site_id) REFERENCES sites(id),
-            FOREIGN KEY (user_id) REFERENCES users(id),
-            PRIMARY KEY (site_id, user_id)
-        ) WITHOUT ROWID;
-    """)
-    DB.commit_release()
-
-    # make sure the db doesn't contain frequencies that are not specified by the config
-    cur = DB.aquire()
-    frequency_check = cur.execute(
-        f"SELECT COUNT(*) from sites WHERE frequency NOT IN ({','.join(['?'] * len(UPDATE_FREQUENCIES))})",
-        list(UPDATE_FREQUENCIES.values())
-    ).fetchone()
-    DB.release()
-    assert(frequency_check[0] == 0)
-
 def inform_site_changed(site_id, mode, new_hash):
     global DB
     global BOT
@@ -744,46 +666,124 @@ def poll_sites():
             delay = max(delay_to_next[0], 1)
             time.sleep(delay)
 
+def setup_tg_bot():
+    global CONFIG
+    global BOT
+    BOT = Updater(CONFIG["bot_token"], use_context=True, workers=NUM_WORKER_THREADS)
 
-if __name__ == '__main__':
+    dp = BOT.dispatcher
+    dp.add_handler(CommandHandler('start', cmd_start))
+    dp.add_handler(CommandHandler('help', cmd_help))
+    dp.add_handler(CommandHandler('list', cmd_list))
+    dp.add_handler(CommandHandler('add', cmd_add))
+    dp.add_handler(CommandHandler('remove', cmd_remove))
+    dp.add_handler(CommandHandler('mode', cmd_mode))
+
+    BOT.start_polling()
+
+def setup_db():
+    global DB
+    global SCRIPT_DIR_PATH
+    DB = Database(SCRIPT_DIR_PATH + "/data.sqlite3")
+    cur = DB.aquire()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER NOT NULL PRIMARY KEY,
+            tg_chat_id INTEGER NOT NULL UNIQUE,
+            is_group BOOLEAN
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sites (
+            id INTEGER NOT NULL PRIMARY KEY,
+            url TEXT NOT NULL,
+            mode INTEGER NOT NULL,
+            frequency INTEGER NOT NULL,
+            hash TEXT,
+            seed INTEGER NOT NULL
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS notifications (
+            site_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            FOREIGN KEY (site_id) REFERENCES sites(id),
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            PRIMARY KEY (site_id, user_id)
+        ) WITHOUT ROWID;
+    """)
+    DB.commit_release()
+
+    # make sure the db doesn't contain frequencies that are not specified by the config
+    cur = DB.aquire()
+    frequency_check = cur.execute(
+        f"SELECT COUNT(*) from sites WHERE frequency NOT IN ({','.join(['?'] * len(UPDATE_FREQUENCIES))})",
+        list(UPDATE_FREQUENCIES.values())
+    ).fetchone()
+    DB.release()
+    assert(frequency_check[0] == 0)
+
+def setup_config():
+    global INT_MAX
+    INT_MAX = 2**31 - 1
+
+    global SCRIPT_DIR_PATH
     SCRIPT_DIR_PATH = os.path.dirname(os.path.realpath(__file__))
+
+    # the maximum number of characters before the url in /list
+    global MAX_URL_PREFIX_LEN
+    MAX_URL_PREFIX_LEN = 4 + len(str((INT_MAX))) + 1 + 1 # 4 spaces + id name + colon + space
+
+    global STDIO_SUPPRESSION_FILE
+    STDIO_SUPPRESSION_FILE = open(os.devnull, "w")
+
+    global CONFIG
     with open(SCRIPT_DIR_PATH + "/config.json", "r") as f:
         CONFIG = json.load(f)
 
+    global MAX_URL_LEN
+    # this limit ensures that each line in /list is a clickable url
+    MAX_URL_LEN = telegram.MAX_MESSAGE_LENGTH - MAX_URL_PREFIX_LEN
     if "max_url_len" in CONFIG:
         mul = int(CONFIG["max_url_len"])
         if mul > 0:
             MAX_URL_LEN = mul
 
+    global DEFAULT_DIFF_MODE
+    DEFAULT_DIFF_MODE = DiffMode.HTML
     if "default_diff_mode" in CONFIG:
         DEFAULT_DIFF_MODE = DiffMode.from_string(CONFIG["default_diff_mode"])
 
+    global MAX_SITES_PER_USER
+    MAX_SITES_PER_USER = 100
     if "max_sites_per_user" in CONFIG:
         MAX_SITES_PER_USER = int(CONFIG["max_sites_per_user"])
 
-    if "max_sites_per_user" in CONFIG:
+    global NUM_WORKER_THREADS
+    NUM_WORKER_THREADS = 16
+    if "num_worker_threads" in CONFIG:
         nwt = int(CONFIG["num_worker_threads"])
         if nwt > 0:
             NUM_WORKER_THREADS = nwt
 
-    UPDATE_INTERVAL_SECONDS = int(CONFIG["update_interval_seconds"])
-
-    STDIO_SUPPRESSION_FILE = open(os.devnull, "w")
-
+    global UPDATE_FREQUENCIES
     UPDATE_FREQUENCIES = {}
     for name, val in CONFIG["update_frequencies_seconds"].items():
         UPDATE_FREQUENCIES[name] = int(val)
 
+    global UPDATE_FREQUENCY_NAMES
     UPDATE_FREQUENCY_NAMES = {freq: name for name, freq in UPDATE_FREQUENCIES.items()}
 
+    global DEFAULT_UPDATE_FREQUENCY
     DEFAULT_UPDATE_FREQUENCY = UPDATE_FREQUENCIES[CONFIG["default_update_frequency"]]
 
+    global TIMESTEP
     TIMESTEP = math.lcm(*UPDATE_FREQUENCIES.values())
     assert(TIMESTEP < INT_MAX)
 
+if __name__ == '__main__':
+    setup_config()
     setup_db()
-
-
     setup_tg_bot()
     poll_sites()
 
