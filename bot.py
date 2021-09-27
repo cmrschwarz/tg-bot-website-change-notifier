@@ -359,6 +359,7 @@ def cmd_add(update, context):
     global DEFAULT_DIFF_MODE
     global MAX_SITES_PER_USER
     global DEFAULT_UPDATE_FREQUENCY
+    global UPDATE_FREQUENCY_NAMES
     url = update.message.text
     try:
         cmd = "/add"
@@ -373,11 +374,6 @@ def cmd_add(update, context):
         return
 
     cur = DB.aquire()
-    select_query = lambda: cur.execute(
-            "SELECT id FROM sites WHERE url = ? AND mode = ?",
-            [url, DEFAULT_DIFF_MODE.to_int()]
-        ).fetchmany(2)
-
     try:
         uid = get_user_id(update.message)
         res = cur.execute("SELECT COUNT(*) FROM notifications WHERE user_id = ?", [uid]).fetchone()
@@ -387,13 +383,13 @@ def cmd_add(update, context):
                 f'the sites per user limit ({MAX_SITES_PER_USER}) would be exceeded. refusing to add this url.',
             )
             return
-        res = select_query()
+        site_id = get_site_id(cur, url, DEFAULT_DIFF_MODE, DEFAULT_UPDATE_FREQUENCY)
     except Exception as ex:
         DB.release()
         raise ex
 
     site_added = False
-    if not res:
+    if not site_id:
         DB.release()
         hash = get_site_hash(url, DEFAULT_DIFF_MODE)
         if not hash:
@@ -404,37 +400,54 @@ def cmd_add(update, context):
             return
         cur = DB.aquire()
         try:
-            res = select_query()
-            if not res:
+            site_id = get_site_id(cur, url, DEFAULT_DIFF_MODE, DEFAULT_UPDATE_FREQUENCY)
+            if not site_id:
                 cur.execute(
                     "INSERT INTO sites (url, mode, frequency, hash, seed) VALUES (?, ?, ?, ?, ?)",
                     [url, DEFAULT_DIFF_MODE.to_int(), DEFAULT_UPDATE_FREQUENCY, hash, random_seed()]
                 )
+                site_id = get_site_id(cur, url, DEFAULT_DIFF_MODE, DEFAULT_UPDATE_FREQUENCY)
+                assert(site_id)
                 site_added = True
-                res = select_query()
         except Exception as ex:
             DB.rollback_release()
             raise ex
 
     try:
-        assert(len(res) == 1)
-        site_id = res[0][0]
-        res = None
-        notif_added = False
+        notif_added = True
         if not site_added:
-            res = cur.execute("SELECT * FROM notifications where site_id = ? AND user_id = ?", [site_id, uid]).fetchmany(2)
+            res = cur.execute(
+                """
+                    SELECT mode, frequency
+                        FROM notifications
+                        INNER JOIN sites
+                        ON site_id = id
+                        WHERE site_id = ? AND user_id = ?
+                """,
+                [site_id, uid]
+            ).fetchone()
+            if res:
+                notif_added = False
+                prev_mode, prev_freq = res
 
-        if not res:
-            notif_added = True
-            res = cur.execute("INSERT INTO notifications (site_id, user_id) VALUES (?, ?)", [site_id, uid])
+        if notif_added:
+            cur.execute("INSERT INTO notifications (site_id, user_id) VALUES (?, ?)", [site_id, uid])
+            DB.commit_release()
+        else:
+            DB.release()
+
     except Exception as ex:
         DB.rollback_release()
         raise ex
-    DB.commit_release()
+
     if notif_added:
         reply_to_msg(update.message, True, f'now tracking this url')
     else:
-        reply_to_msg(update.message, True, f'already tracking this url')
+        reply_to_msg(
+            update.message, True,
+            f"already tracking this url in {DiffMode.from_int(prev_mode).to_string()} mode " +
+                f"[{UPDATE_FREQUENCY_NAMES[prev_freq]}]"
+        )
 
 
 
