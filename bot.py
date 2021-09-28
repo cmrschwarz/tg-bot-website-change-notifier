@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 from codecs import replace_errors
 from math import ceil
-from re import match
+from re import match, split
 from sqlite3 import dbapi2
 from textwrap import dedent, indent
 import requests
@@ -174,29 +174,32 @@ def reply_to_msg(message, explicit_reply, txt, monospaced=False, extra_entities=
     reply_to_message_id=message.message_id if explicit_reply else None
 
     while txt_co_len > telegram.MAX_MESSAGE_LENGTH:
+        split_pos = txt_co[0:telegram.MAX_MESSAGE_LENGTH].rfind("\n")
+        if split_pos < 20:
+            split_pos = telegram.MAX_MESSAGE_LENGTH
         relevant_entities = []
         for i in range(len(entities)):
             e = entities[i]
-            if e.offset > telegram.MAX_MESSAGE_LENGTH:
+            if e.offset > split_pos:
                 entities = entities[i:]
                 break
-            if e.offset + e.length > telegram.MAX_MESSAGE_LENGTH:
+            if e.offset + e.length > split_pos:
                 if e.type == MessageEntity.URL:
                     # splitting a url, make it not clickable to prevent confusion
                     e.type = MessageEntity.CODE
-                relevant_length = telegram.MAX_MESSAGE_LENGTH - e.offset
+                relevant_length = split_pos - e.offset
                 relevant_entities.append(MessageEntity(e.type, e.offset, relevant_length))
-                e.offset = telegram.MAX_MESSAGE_LENGTH
+                e.offset = split_pos
                 e.length -= relevant_length
                 entities = entities[i:]
                 break
             relevant_entities.append(e)
-        message.reply_text(txt_co[0:telegram.MAX_MESSAGE_LENGTH], reply_to_message_id=reply_to_message_id, entities=relevant_entities, disable_web_page_preview=disable_web_page_preview)
+        message.reply_text(txt_co[0:split_pos], reply_to_message_id=reply_to_message_id, entities=relevant_entities, disable_web_page_preview=disable_web_page_preview)
         reply_to_message_id=None
         for e in entities:
-            e.offset -= telegram.MAX_MESSAGE_LENGTH
-        txt_co = txt_co[telegram.MAX_MESSAGE_LENGTH:]
-        txt_co_len -= telegram.MAX_MESSAGE_LENGTH
+            e.offset -= split_pos
+        txt_co = txt_co[split_pos:]
+        txt_co_len -= split_pos
 
     message.reply_text(txt_co, reply_to_message_id=reply_to_message_id, entities=entities, disable_web_page_preview=disable_web_page_preview)
 
@@ -207,7 +210,7 @@ def random_seed():
 def pretty_name(name, is_group):
     return f"group '{name}'" if is_group else f"@{name}"
 
-def get_user_id(message, need_admin=False):
+def get_user_id(message, need_admin=False, full_output = False):
     #todo update changed usernames
     global DB
     global BOT
@@ -226,17 +229,28 @@ def get_user_id(message, need_admin=False):
         ).fetchone()
         res = select_query()
         id = None
-        if res:
-            DB.release()
-            id, db_name, state = res
-            #todo: update name
-            assert(db_name == name)
-            state = UserState.from_int(state)
-            if state == UserState.BLOCKED: return None
-            if need_admin and state != UserState.ADMIN: return None
-            if state != UserState.UNAUTHORIZED: return id
+    except Exception as ex:
+        DB.rollback_release()
+        raise ex
 
-        if not id:
+    if res:
+        DB.release()
+        id, db_name, state = res
+        #todo: update name
+        assert(db_name == name)
+        state = UserState.from_int(state)
+        if state == UserState.BLOCKED: return None
+        if need_admin and state != UserState.ADMIN and state != UserState.UNAUTHORIZED:
+            reply_to_msg(message, True, "missing admin privileges")
+            return None
+        if state != UserState.UNAUTHORIZED:
+            if full_output:
+                return id, name, is_group, state
+            else:
+                return id
+
+    if not id:
+        try:
             if is_admin_message(message):
                 assert(not is_group)
                 cur.execute(
@@ -247,18 +261,15 @@ def get_user_id(message, need_admin=False):
                 DB.commit_release()
                 return res[0]
             else:
-                if need_admin:
-                    DB.release()
-                    return None
                 cur.execute(
                     "INSERT INTO users (tg_chat_id, name, is_group, state) VALUES (?,?,?,?)",
                     [chat_id, name, is_group, UserState.UNAUTHORIZED.to_int()]
                 )
                 id, name, state = select_query()
                 DB.commit_release()
-    except Exception as ex:
-        DB.rollback_release()
-        raise ex
+        except Exception as ex:
+            DB.rollback_release()
+            raise ex
 
     reply_to_msg(message, True, "unauthorized")
 
@@ -291,7 +302,7 @@ def cmd_start(update, context):
     reply_to_msg(update.message, True, "Hello! Please use /help for a list of commands.")
 
 def pad(str, length, pad_char=" "):
-    assert(length > len(str) and len(pad_char) == 1)
+    assert(length >= len(str) and len(pad_char) == 1)
     return str + pad_char * (length - len(str))
 
 def insert_at_heading(str, heading, insert, after=True):
@@ -366,6 +377,9 @@ def cmd_help(update, context):
             /listall                     list all tracked sites
             /siteinfo <id>               list all users using a site and the respective modes
 
+        DEBUG COMMANDS:
+            /whoami                     list information about the current user
+
                 """
             ),
             after=False
@@ -374,20 +388,46 @@ def cmd_help(update, context):
     reply_to_msg(update.message, True, text, monospaced=True)
 
 def cmd_whoami(update, context):
-    uid = get_user_id(update.message)
-    if not uid: return
-
-    response = ""
-    if update.message.from_user:
-        response += f"user id: {update.message.from_user.id}\n"
-    response += f"chat id: {update.message.chat.id}\n"
+    user = get_user_id(update.message, full_output=True)
+    if not user: return
+    id, name, is_group, state = user
+    response = f"{id}: {pretty_name(name, is_group)} [{state.to_string()}]\n"
+    response += f"telegram chat id: {update.message.chat.id}\n"
+    if not is_group:
+        response += f"telegram user id: {update.message.from_user.id}\n"
     reply_to_msg(update.message, True, response, monospaced=True)
 
 def cmd_listusers(update, context):
     uid = get_user_id(update.message, need_admin=True)
     if not uid: return
 
-    reply_to_msg(update.message, True, "not implemented yet :/")
+    cur = DB.aquire()
+    msg = ""
+    max_id_len = cur.execute("SELECT MAX(length(CAST(id AS TEXT))) FROM users").fetchone()[0] + 3
+    max_username_len = cur.execute("SELECT MAX(length(name)) FROM users").fetchone()[0] + 4
+    users = cur.execute("SELECT id, name, state from users WHERE is_group = False")
+    has_users = False
+    has_groups = False
+    while True:
+        u = users.fetchone()
+        if not u: break
+        if not has_users:
+            has_users = True
+            msg += "USERS:\n"
+        id, name, state = u
+        msg += pad(f"{id}:", max_id_len) + pad(f" @{name}", max_username_len) + f"[{UserState.from_int(state).to_string()}]\n"
+    groups = cur.execute("SELECT id, name, state from users WHERE is_group = True")
+    while True:
+        g = groups.fetchone()
+        if not g: break
+        if not has_groups:
+            has_groups = True
+            if has_users: msg += "\n"
+            msg += "GROUPS:\n"
+        id, name, state = g
+        msg += pad(f"{id}:", max_id_len) + pad(f"'{name}'", max_username_len) + f"[{UserState.from_int(state).to_string()}]"
+    DB.release()
+    reply_to_msg(update.message, True, msg, monospaced=True)
 
 def cmd_listall(update, context):
     uid = get_user_id(update.message, need_admin=True)
