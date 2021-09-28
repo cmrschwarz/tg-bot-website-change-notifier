@@ -360,11 +360,11 @@ def cmd_help(update, context):
             text, "MODES",
             dedent(
                 """\
-                ADMIN COMMANDS:
-                    /listusers                       list all users
-                    /userstate <user id> <state>     change the state for a user
-                    /listall                         list all tracked sites
-                    /siteinfo <id>                   list all users using a site and the respective modes
+        ADMIN COMMANDS:
+            /listusers                   list all users
+            /userstate <uid> <state>     change the state for a user
+            /listall                     list all tracked sites
+            /siteinfo <id>               list all users using a site and the respective modes
 
                 """
             ),
