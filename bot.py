@@ -293,6 +293,7 @@ def get_user_id(message, need_admin=False, full_output = False):
                     ]
                 )
             )
+        DB.release()
     except Exception as ex:
         DB.rollback_release()
         raise ex
@@ -926,13 +927,13 @@ def authorization_callback(update, cb_cmd, target_state, action_name):
     id = int(arg)
     try:
         cur = DB.aquire()
-        res = cur.execute("SELECT name, is_group, state FROM users  WHERE id = ?", [id]).fetchone()
+        res = cur.execute("SELECT name, tg_chat_id, is_group, state FROM users  WHERE id = ?", [id]).fetchone()
     except Exception as ex:
         DB.rollback_release()
         raise ex
 
     if res:
-        name, is_group, state = res
+        name, tg_chat_id, is_group, state = res
         state = UserState.from_int(state)
     if not res:
         DB.release()
@@ -948,6 +949,8 @@ def authorization_callback(update, cb_cmd, target_state, action_name):
             DB.rollback_release()
             raise ex
         reply_to_msg(update.callback_query.message, False, f"{action_name} {pretty_name(name, is_group)}")
+        if(target_state == UserState.AUTHORIZED):
+            BOT.bot.send_message(tg_chat_id, f"authorization granted to {pretty_name(name, is_group)}")
     update.callback_query.edit_message_reply_markup()
 
 
