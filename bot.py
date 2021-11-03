@@ -11,22 +11,23 @@ from enum import Enum
 import hashlib
 import datetime
 import threading
-import imgkit
+import imgkit  # pip3 install imgkit
 import time
 import random
 import sqlite3
 import math
 import os
 import sys
-from url_normalize import url_normalize
+from url_normalize import url_normalize  # pip3 install url_normalize
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
 
-import telegram #pip3 install python-telegram-bot
+import telegram  # pip3 install python-telegram-bot
 from telegram import (MessageEntity, InlineKeyboardButton)
 from telegram.constants import MESSAGEENTITY_URL
 from telegram.ext import (Updater, CommandHandler, CallbackQueryHandler)
 from telegram.inline.inlinekeyboardmarkup import InlineKeyboardMarkup
+
 
 class DiffMode(Enum):
     HTML = (0, "html")
@@ -48,6 +49,7 @@ class DiffMode(Enum):
         for dm in DiffMode:
             if dm.to_string() == s:
                 return dm
+
 
 class UserState(Enum):
     UNAUTHORIZED = (0, "unauthorized")
@@ -71,6 +73,46 @@ class UserState(Enum):
         for dm in UserState:
             if dm.to_string() == s:
                 return dm
+
+
+class LogLevel(Enum):
+    ERROR = (0, "error")
+    WARN = (1, "warn")
+    INFO = (2, "info")
+    DEBUG = (3, "debug")
+
+    def to_string(self):
+        return self.value[1]
+
+    def to_int(self):
+        return self.value[0]
+
+    def from_int(i):
+        for dm in LogLevel:
+            if dm.to_int() == i:
+                return dm
+
+    def from_string(s):
+        s = s.lower()
+        for dm in LogLevel:
+            if dm.to_string() == s:
+                return dm
+
+    def __lt__(self, other):
+        return self.to_int() < other.to_int()
+
+    def __gt__(self, other):
+        return self.to_int() > other.to_int()
+
+    def __le__(self, other):
+        return self.to_int() <= other.to_int()
+
+    def __ge__(self, other):
+        return self.to_int() >= other.to_int()
+
+    def __eq__(self, other):
+        return self.to_int() == other.to_int()
+
 
 class Database:
     def __init__(self, url):
@@ -109,8 +151,123 @@ class Database:
         self.rollback = True
         self.release()
 
+
+def log(level, text):
+    level = LogLevel.DEBUG
+    global LOG_LEVEL
+    if level < LOG_LEVEL:
+        return
+    time_str = datetime.datetime.now().isoformat(sep=' ', timespec='seconds')
+    if level == LOG_LEVEL.ERROR:
+        sys.stderr.write(f"[ERROR] {time_str}: {text}\n")
+    else:
+        level_str = "[" + level.to_string().upper() + "]"
+        # e.g. INFO is shorter than ERROR.
+        # to canonicalize this we add a blank
+        level_str = (level_str + " ")[0:len("[ERROR]")]
+        sys.stdout.write(f"{level_str} {time_str}: {text}\n")
+
+
+class SitePoller:
+    def __init__(self):
+        global NUM_WORKER_THREADS
+        global UPDATE_FREQUENCIES
+        self.lock = threading.Lock()
+        self.timer = None
+        self.delay_to_next = 0
+        # if we used min instead of now(), on a restart all pages would
+        # be polled immediately, potentially causing lots of load
+        # this way we ease in using the normal frequency + seed distribution
+        self.last_poll = datetime.datetime.now()
+        self.timestep = lcm(*UPDATE_FREQUENCIES.values())
+        self.smallest_frequency = min(UPDATE_FREQUENCIES.values())
+        self.last_seed = 0
+        self.thread_pool = ThreadPoolExecutor(NUM_WORKER_THREADS)
+        assert(self.timestep < INT_MAX)
+
+    def poll_sites_raw(self):
+        global CONFIG
+        global DB
+
+        now = datetime.datetime.now()
+        diff = now - self.last_poll
+        self.last_poll = now
+        secs_since_last = diff.total_seconds()
+        cur = DB.aquire()
+        query = cur.execute(
+            f"""
+                SELECT id, url, mode, frequency, hash, ((seed - ?) % frequency + frequency) % frequency AS delay
+                    FROM sites
+                    WHERE delay < ?
+                    ORDER BY delay ASC
+            """,
+            [self.last_seed, secs_since_last]
+        )
+        while True:
+            res = query.fetchone()
+            if not res:
+                break
+            site_id, url, mode, freq, hash, _delay = res
+            mode = DiffMode.from_int(mode)
+            self.thread_pool.submit(
+                poll_site, site_id, url, mode, freq, hash)
+        self.last_seed = (self.last_seed + secs_since_last) % self.timestep
+        # more compact would be mod(mod(seed - curr_seed, update_interval_secs) + update_interval_secs, update_interval_secs)
+        # but not all instances of sqlite3 support the mod function
+        delay_to_next = cur.execute(
+            f"""
+                SELECT (CAST(seed - ? AS INTEGER) % frequency + frequency) % frequency + ABS((seed - ?) - CAST(seed - ? AS INTEGER)) AS delay
+                    FROM sites
+                    ORDER BY delay ASC
+                    LIMIT 1
+            """,
+            [self.last_seed] * 3
+        ).fetchone()
+        DB.release()
+
+        if not delay_to_next:
+            self.delay_to_next = self.timestep
+            log(LogLevel.DEBUG,
+                f"scheduled poll in {self.delay_to_next} seconds")
+        else:
+            self.delay_to_next = max(delay_to_next[0], 1)
+
+    def setup_timer_under_lock(self):
+        if self.delay_to_next:
+            self.timer = threading.Timer(
+                self.delay_to_next, self.scheduled_poll_sites
+            )
+            self.timer.start()
+
+    def scheduled_poll_sites(self):
+        self.lock.acquire()
+        assert(self.timer)
+        self.timer = None
+        try:
+            log(LogLevel.DEBUG, f"running scheduled poll")
+            self.poll_sites_raw()
+            self.setup_timer_under_lock()
+        finally:
+            self.lock.release()
+
+    def async_poll_sites(self):
+        self.lock.acquire()
+        if self.timer:
+            log(LogLevel.DEBUG, f"cancelled scheduled poll")
+            self.timer.cancel()
+            self.timer = None
+        try:
+            log(LogLevel.DEBUG, f"running async poll")
+            self.poll_sites_raw()
+            self.setup_timer_under_lock()
+        finally:
+            self.lock.release()
+
+
 def get_site_hash(url, diff_mode):
     global STDIO_SUPPRESSION_FILE
+    log(LogLevel.INFO,
+        f"accessing site in {diff_mode.to_string()} mode: {url}")
     try:
         if diff_mode == DiffMode.RENDER:
             # suppress uselesss 'Rendering...' etc. console output
@@ -125,8 +282,7 @@ def get_site_hash(url, diff_mode):
         return digest
     except Exception as ex:
         err_msg = str(ex)
-        sys.stderr.write(
-            f"{datetime.datetime.now().isoformat(sep=' ', timespec='seconds')}: failed to load '{url}':\n"
+        log(LogLevel.ERROR, f"failed to load '{url}':\n"
             + indent(
                 (
                     "-" * 80 + "\n"
@@ -136,21 +292,26 @@ def get_site_hash(url, diff_mode):
                 ),
                 prefix=" " * 4
             )
-        )
+            )
         return None
+
 
 def cutoff(txt, rem_len_needed=0, max_len=telegram.MAX_MESSAGE_LENGTH):
     txt_len = len(txt)
     max_txt_len = max_len - rem_len_needed
-    if max_txt_len >= txt_len: return txt
-    if max_txt_len > 5: return txt[0:max_txt_len-4] + " ..."
-    if max_txt_len < 0: return ""
+    if max_txt_len >= txt_len:
+        return txt
+    if max_txt_len > 5:
+        return txt[0:max_txt_len-4] + " ..."
+    if max_txt_len < 0:
+        return ""
     return "....."[0:max_txt_len]
+
 
 def reply_to_msg(message, explicit_reply, txt, monospaced=False, extra_entities=None, disable_web_page_preview=None):
     txt_co = txt.rstrip()
     txt_co_len = len(txt_co)
-    entities=[]
+    entities = []
     if extra_entities:
         for e in extra_entities:
             if e.offset < txt_co_len:
@@ -162,16 +323,18 @@ def reply_to_msg(message, explicit_reply, txt, monospaced=False, extra_entities=
             entites_with_ms = []
             for e in entities:
                 if e.offset != last_end:
-                    entites_with_ms.append(MessageEntity(MessageEntity.CODE, last_end, e.offset - last_end))
+                    entites_with_ms.append(MessageEntity(
+                        MessageEntity.CODE, last_end, e.offset - last_end))
                 last_end = e.offset + e.length
                 entites_with_ms.append(e)
             if last_end != txt_co_len:
-                entites_with_ms.append(MessageEntity(MessageEntity.CODE, last_end, txt_co_len - last_end))
+                entites_with_ms.append(MessageEntity(
+                    MessageEntity.CODE, last_end, txt_co_len - last_end))
             entities = entites_with_ms
         else:
             entities = [MessageEntity(MessageEntity.CODE, 0, txt_co_len)]
 
-    reply_to_message_id=message.message_id if explicit_reply else None
+    reply_to_message_id = message.message_id if explicit_reply else None
 
     while txt_co_len > telegram.MAX_MESSAGE_LENGTH:
         split_pos = txt_co[0:telegram.MAX_MESSAGE_LENGTH].rfind("\n")
@@ -188,30 +351,36 @@ def reply_to_msg(message, explicit_reply, txt, monospaced=False, extra_entities=
                     # splitting a url, make it not clickable to prevent confusion
                     e.type = MessageEntity.CODE
                 relevant_length = split_pos - e.offset
-                relevant_entities.append(MessageEntity(e.type, e.offset, relevant_length))
+                relevant_entities.append(MessageEntity(
+                    e.type, e.offset, relevant_length))
                 e.offset = split_pos
                 e.length -= relevant_length
                 entities = entities[i:]
                 break
             relevant_entities.append(e)
-        message.reply_text(txt_co[0:split_pos], reply_to_message_id=reply_to_message_id, entities=relevant_entities, disable_web_page_preview=disable_web_page_preview)
-        reply_to_message_id=None
+        message.reply_text(txt_co[0:split_pos], reply_to_message_id=reply_to_message_id,
+                           entities=relevant_entities, disable_web_page_preview=disable_web_page_preview)
+        reply_to_message_id = None
         for e in entities:
             e.offset -= split_pos
         txt_co = txt_co[split_pos:]
         txt_co_len -= split_pos
 
-    message.reply_text(txt_co, reply_to_message_id=reply_to_message_id, entities=entities, disable_web_page_preview=disable_web_page_preview)
+    message.reply_text(txt_co, reply_to_message_id=reply_to_message_id,
+                       entities=entities, disable_web_page_preview=disable_web_page_preview)
+
 
 def random_seed():
     global INT_MAX
     return random.randint(0, INT_MAX)
 
+
 def pretty_name(name, is_group):
     return f"group '{name}'" if is_group else f"@{name}"
 
-def get_user_id(message, need_admin=False, full_output = False):
-    #todo update changed usernames
+
+def get_user_id(message, need_admin=False, full_output=False):
+    # todo update changed usernames
     global DB
     global BOT
     chat_id = message.chat.id
@@ -223,7 +392,7 @@ def get_user_id(message, need_admin=False, full_output = False):
 
     cur = DB.aquire()
     try:
-        select_query = lambda: cur.execute(
+        def select_query(): return cur.execute(
             "SELECT id, name, state FROM users WHERE tg_chat_id = ?",
             [chat_id]
         ).fetchone()
@@ -236,10 +405,11 @@ def get_user_id(message, need_admin=False, full_output = False):
     if res:
         DB.release()
         id, db_name, state = res
-        #todo: update name
+        # todo: update name
         assert(db_name == name)
         state = UserState.from_int(state)
-        if state == UserState.BLOCKED: return None
+        if state == UserState.BLOCKED:
+            return None
         if need_admin and state != UserState.ADMIN and state != UserState.UNAUTHORIZED:
             reply_to_msg(message, True, "missing admin privileges")
             return None
@@ -275,10 +445,12 @@ def get_user_id(message, need_admin=False, full_output = False):
 
     cur = DB.aquire()
     try:
-        res = cur.execute("SELECT tg_chat_id FROM users WHERE state = ?", [UserState.ADMIN.to_int()])
+        res = cur.execute("SELECT tg_chat_id FROM users WHERE state = ?", [
+            UserState.ADMIN.to_int()])
         while True:
             next = res.fetchone()
-            if not next: break
+            if not next:
+                break
 
             BOT.bot.send_message(
                 next[0],
@@ -286,9 +458,12 @@ def get_user_id(message, need_admin=False, full_output = False):
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [
-                            InlineKeyboardButton("Authorize", callback_data="/authorize " + str(id)),
-                            InlineKeyboardButton("Deny", callback_data="/deny " + str(id)),
-                            InlineKeyboardButton("Block", callback_data="/block " + str(id)),
+                            InlineKeyboardButton(
+                                "Authorize", callback_data="/authorize " + str(id)),
+                            InlineKeyboardButton(
+                                "Deny", callback_data="/deny " + str(id)),
+                            InlineKeyboardButton(
+                                "Block", callback_data="/block " + str(id)),
                         ]
                     ]
                 )
@@ -300,11 +475,14 @@ def get_user_id(message, need_admin=False, full_output = False):
 
 
 def cmd_start(update, context):
-    reply_to_msg(update.message, True, "Hello! Please use /help for a list of commands.")
+    reply_to_msg(update.message, True,
+                 "Hello! Please use /help for a list of commands.")
+
 
 def pad(str, length, pad_char=" "):
     assert(length >= len(str) and len(pad_char) == 1)
     return str + pad_char * (length - len(str))
+
 
 def insert_at_heading(str, heading, insert, after=True):
     insert_pos = str.find(heading)
@@ -312,14 +490,18 @@ def insert_at_heading(str, heading, insert, after=True):
         insert_pos += len(heading)
     return str[:insert_pos] + insert + str[insert_pos:]
 
+
 def is_admin_message(message):
     global ADMIN_USER_NAMES
-    if not message.from_user or message.from_user.id != message.chat.id: return False
+    if not message.from_user or message.from_user.id != message.chat.id:
+        return False
     return message.from_user.username in ADMIN_USER_NAMES
+
 
 def cmd_help(update, context):
     uid = get_user_id(update.message)
-    if not uid: return
+    if not uid:
+        return
 
     global ADMIN_USER_NAMES
     global DEFAULT_DIFF_MODE
@@ -327,7 +509,8 @@ def cmd_help(update, context):
     global MAX_SITES_PER_USER
     global MAX_URL_LEN
     global UPDATE_FREQUENCIES
-    default_mode = lambda mode: "(default)" if (mode == DEFAULT_DIFF_MODE) else ""
+    def default_mode(mode): return "(default)" if (
+        mode == DEFAULT_DIFF_MODE) else ""
 
     text = f"""\
         COMMANDS:
@@ -388,9 +571,11 @@ def cmd_help(update, context):
 
     reply_to_msg(update.message, True, text, monospaced=True)
 
+
 def cmd_whoami(update, context):
     user = get_user_id(update.message, full_output=True)
-    if not user: return
+    if not user:
+        return
     id, name, is_group, state = user
     response = f"{id}: {pretty_name(name, is_group)} [{state.to_string()}]\n"
     response += f"telegram chat id: {update.message.chat.id}\n"
@@ -398,60 +583,78 @@ def cmd_whoami(update, context):
         response += f"telegram user id: {update.message.from_user.id}\n"
     reply_to_msg(update.message, True, response, monospaced=True)
 
+
 def cmd_listusers(update, context):
     uid = get_user_id(update.message, need_admin=True)
-    if not uid: return
+    if not uid:
+        return
 
     cur = DB.aquire()
     msg = ""
-    max_id_len = cur.execute("SELECT MAX(length(CAST(id AS TEXT))) FROM users").fetchone()[0] + 3
-    max_username_len = cur.execute("SELECT MAX(length(name)) FROM users").fetchone()[0] + 4
-    users = cur.execute("SELECT id, name, state from users WHERE is_group = False")
+    max_id_len = cur.execute(
+        "SELECT MAX(length(CAST(id AS TEXT))) FROM users").fetchone()[0] + 3
+    max_username_len = cur.execute(
+        "SELECT MAX(length(name)) FROM users").fetchone()[0] + 4
+    users = cur.execute(
+        "SELECT id, name, state from users WHERE is_group = False")
     has_users = False
     has_groups = False
     while True:
         u = users.fetchone()
-        if not u: break
+        if not u:
+            break
         if not has_users:
             has_users = True
             msg += "USERS:\n"
         id, name, state = u
-        msg += pad(f"{id}:", max_id_len) + pad(f" @{name}", max_username_len) + f"[{UserState.from_int(state).to_string()}]\n"
-    groups = cur.execute("SELECT id, name, state from users WHERE is_group = True")
+        msg += pad(f"{id}:", max_id_len) + pad(f" @{name}", max_username_len) + \
+            f"[{UserState.from_int(state).to_string()}]\n"
+    groups = cur.execute(
+        "SELECT id, name, state from users WHERE is_group = True")
     while True:
         g = groups.fetchone()
-        if not g: break
+        if not g:
+            break
         if not has_groups:
             has_groups = True
-            if has_users: msg += "\n"
+            if has_users:
+                msg += "\n"
             msg += "GROUPS:\n"
         id, name, state = g
-        msg += pad(f"{id}:", max_id_len) + pad(f"'{name}'", max_username_len) + f"[{UserState.from_int(state).to_string()}]"
+        msg += pad(f"{id}:", max_id_len) + pad(f"'{name}'",
+                                               max_username_len) + f"[{UserState.from_int(state).to_string()}]"
     DB.release()
     reply_to_msg(update.message, True, msg, monospaced=True)
 
+
 def cmd_listall(update, context):
     uid = get_user_id(update.message, need_admin=True)
-    if not uid: return
+    if not uid:
+        return
 
     reply_to_msg(update.message, True, "not implemented yet :/")
+
 
 def cmd_userstate(update, context):
     uid = get_user_id(update.message, need_admin=True)
-    if not uid: return
+    if not uid:
+        return
 
     reply_to_msg(update.message, True, "not implemented yet :/")
 
+
 def cmd_siteinfo(update, context):
     uid = get_user_id(update.message, need_admin=True)
-    if not uid: return
+    if not uid:
+        return
 
     reply_to_msg(update.message, True, "not implemented yet :/")
 
 
 def cmd_list(update, context):
     uid = get_user_id(update.message)
-    if not uid: return
+    if not uid:
+        return
 
     cur = DB.aquire()
     try:
@@ -476,7 +679,8 @@ def cmd_list(update, context):
     sites_by_type = {}
     longest_id = 0
     for site in sites:
-        id, url, mode, freq = str(site[0]), site[1], DiffMode.from_int(site[2]), UPDATE_FREQUENCY_NAMES[site[3]]
+        id, url, mode, freq = str(site[0]), site[1], DiffMode.from_int(
+            site[2]), UPDATE_FREQUENCY_NAMES[site[3]]
         longest_id = max(longest_id, len(id))
         type = (mode, freq)
         if type not in sites_by_type:
@@ -490,10 +694,12 @@ def cmd_list(update, context):
     mode_ends = []
     entity_ends = []
     entities = []
-    line_prefix_len = 4 + longest_id + 1 + 1 # 4 spaces + longest_id + colon + space
+    # 4 spaces + longest_id + colon + space
+    line_prefix_len = 4 + longest_id + 1 + 1
     for (mode, freq), sites in sites_by_type.items():
         if not single_reply:
-            reply_to_msg(update.message, False, sitelist, monospaced=True, extra_entities=entities)
+            reply_to_msg(update.message, False, sitelist,
+                         monospaced=True, extra_entities=entities)
             mode_ends = []
             entity_ends = []
             entities = []
@@ -508,20 +714,22 @@ def cmd_list(update, context):
         sitelist += mode.to_string() + " mode [" + freq + "]:\n"
         for id, url in sites:
             line = f"    {' ' * (longest_id - len(id)) + id}: {url}\n"
-            entities.append(MessageEntity(MessageEntity.URL, len(sitelist) + line_prefix_len, len(line) - line_prefix_len))
+            entities.append(MessageEntity(MessageEntity.URL, len(
+                sitelist) + line_prefix_len, len(line) - line_prefix_len))
             line_len = len(line)
             while len(sitelist) + line_len > telegram.MAX_MESSAGE_LENGTH:
                 single_reply = False
                 last_me = 0
                 last_ee = 0
-                for i in range(0,len(mode_ends)):
+                for i in range(0, len(mode_ends)):
                     me = mode_ends[i]
                     ee = entity_ends[i]
                     relevant_entities = []
                     for e in entities[last_ee:ee]:
                         e.offset -= last_me
                         relevant_entities.append(e)
-                    reply_to_msg(update.message, False, sitelist[last_me:me], monospaced=True, extra_entities=relevant_entities, disable_web_page_preview=True)
+                    reply_to_msg(update.message, False, sitelist[last_me:me], monospaced=True,
+                                 extra_entities=relevant_entities, disable_web_page_preview=True)
                     last_me = me
                     last_ee = ee
                 if mode_ends:
@@ -533,29 +741,32 @@ def cmd_list(update, context):
                         e.offset -= last_me
                     continue
                 else:
-                    reply_to_msg(update.message, False, sitelist, monospaced=True, disable_web_page_preview=True, extra_entities=entities[:-1])
+                    reply_to_msg(update.message, False, sitelist, monospaced=True,
+                                 disable_web_page_preview=True, extra_entities=entities[:-1])
                     entities = entities[-1:]
                     entities[0].offset -= len(sitelist)
                     sitelist = line
                     break
 
-
             else:
                 sitelist += line
     if sitelist != "":
-        reply_to_msg(update.message, single_reply, sitelist, monospaced=True, extra_entities = entities, disable_web_page_preview=True)
+        reply_to_msg(update.message, single_reply, sitelist, monospaced=True,
+                     extra_entities=entities, disable_web_page_preview=True)
 
 
 def cmd_add(update, context):
     global DB
     global CONFIG
+    global SITE_POLLER
     global MAX_URL_LEN
     global DEFAULT_DIFF_MODE
     global MAX_SITES_PER_USER
     global DEFAULT_UPDATE_FREQUENCY
     global UPDATE_FREQUENCY_NAMES
     uid = get_user_id(update.message)
-    if not uid: return
+    if not uid:
+        return
 
     url = update.message.text
     try:
@@ -564,7 +775,8 @@ def cmd_add(update, context):
         url = url[len(cmd):].strip()
         url = url_normalize(url)
         if len(url) > MAX_URL_LEN:
-            reply_to_msg(update.message, True, f'url is too long (limit is set to {MAX_URL_LEN}), refusing to track')
+            reply_to_msg(update.message, True,
+                         f'url is too long (limit is set to {MAX_URL_LEN}), refusing to track')
             return
     except Exception as e:
         reply_to_msg(update.message, True, f'failed to parse url')
@@ -572,14 +784,16 @@ def cmd_add(update, context):
 
     cur = DB.aquire()
     try:
-        res = cur.execute("SELECT COUNT(*) FROM notifications WHERE user_id = ?", [uid]).fetchone()
+        res = cur.execute(
+            "SELECT COUNT(*) FROM notifications WHERE user_id = ?", [uid]).fetchone()
         if res[0] >= MAX_SITES_PER_USER:
             reply_to_msg(
                 update.message, True,
                 f'the sites per user limit ({MAX_SITES_PER_USER}) would be exceeded. refusing to add this url.',
             )
             return
-        site_id = get_site_id(cur, url, DEFAULT_DIFF_MODE, DEFAULT_UPDATE_FREQUENCY)
+        site_id = get_site_id(cur, url, DEFAULT_DIFF_MODE,
+                              DEFAULT_UPDATE_FREQUENCY)
     except Exception as ex:
         DB.release()
         raise ex
@@ -596,13 +810,16 @@ def cmd_add(update, context):
             return
         cur = DB.aquire()
         try:
-            site_id = get_site_id(cur, url, DEFAULT_DIFF_MODE, DEFAULT_UPDATE_FREQUENCY)
+            site_id = get_site_id(
+                cur, url, DEFAULT_DIFF_MODE, DEFAULT_UPDATE_FREQUENCY)
             if not site_id:
                 cur.execute(
                     "INSERT INTO sites (url, mode, frequency, hash, seed) VALUES (?, ?, ?, ?, ?)",
-                    [url, DEFAULT_DIFF_MODE.to_int(), DEFAULT_UPDATE_FREQUENCY, hash, random_seed()]
+                    [url, DEFAULT_DIFF_MODE.to_int(), DEFAULT_UPDATE_FREQUENCY,
+                     hash, random_seed()]
                 )
-                site_id = get_site_id(cur, url, DEFAULT_DIFF_MODE, DEFAULT_UPDATE_FREQUENCY)
+                site_id = get_site_id(
+                    cur, url, DEFAULT_DIFF_MODE, DEFAULT_UPDATE_FREQUENCY)
                 assert(site_id)
                 site_added = True
         except Exception as ex:
@@ -627,7 +844,8 @@ def cmd_add(update, context):
                 prev_mode, prev_freq = res
 
         if notif_added:
-            cur.execute("INSERT INTO notifications (site_id, user_id) VALUES (?, ?)", [site_id, uid])
+            cur.execute(
+                "INSERT INTO notifications (site_id, user_id) VALUES (?, ?)", [site_id, uid])
             DB.commit_release()
         else:
             DB.release()
@@ -638,19 +856,20 @@ def cmd_add(update, context):
 
     if notif_added:
         reply_to_msg(update.message, True, f'now tracking this url')
+        SITE_POLLER.async_poll_sites()
     else:
         reply_to_msg(
             update.message, True,
             f"already tracking this url in {DiffMode.from_int(prev_mode).to_string()} mode " +
-                f"[{UPDATE_FREQUENCY_NAMES[prev_freq]}]"
+            f"[{UPDATE_FREQUENCY_NAMES[prev_freq]}]"
         )
-
 
 
 def cmd_remove(update, context):
     global DB
     uid = get_user_id(update.message)
-    if not uid: return
+    if not uid:
+        return
 
     cmd = "/remove"
     rm_id_str = update.message.text
@@ -659,19 +878,22 @@ def cmd_remove(update, context):
     try:
         rm_id = int(rm_id_str)
     except Exception as ex:
-        reply_to_msg(update.message, True, f"invalid <id> '{cutoff(rm_id_str, max_len=100)}'")
+        reply_to_msg(update.message, True,
+                     f"invalid <id> '{cutoff(rm_id_str, max_len=100)}'")
         return
 
     try:
         cur = DB.aquire()
         uid = get_user_id(update.message)
-        res = cur.execute("DELETE FROM notifications WHERE site_id = ? AND user_id = ?", [rm_id, uid]).rowcount
+        res = cur.execute("DELETE FROM notifications WHERE site_id = ? AND user_id = ?", [
+            rm_id, uid]).rowcount
         if res == 0:
             DB.release()
             reply_to_msg(update.message, True, f'no site with that id present')
             return
         assert(res == 1)
-        res = cur.execute("SELECT COUNT(*) FROM notifications WHERE site_id = ?", [rm_id]).fetchone()
+        res = cur.execute(
+            "SELECT COUNT(*) FROM notifications WHERE site_id = ?", [rm_id]).fetchone()
         if res[0] == 0:
             cur.execute("DELETE FROM sites WHERE id = ?", [rm_id])
         DB.commit_release()
@@ -680,6 +902,7 @@ def cmd_remove(update, context):
         raise ex
     reply_to_msg(update.message, True, f'site removed')
 
+
 def get_site_id(cur, url, mode, freq):
     res = cur.execute(
         "SELECT id FROM sites WHERE url = ? AND mode = ? AND frequency = ?",
@@ -687,13 +910,15 @@ def get_site_id(cur, url, mode, freq):
     ).fetchone()
     return res[0] if res else None
 
+
 def try_change_mode_for_notification(message, user_id, site_id_curr, url, freq, mode_new):
     global DB
     cur = DB.aquire()
     try:
         # check if site with changed config already exists
         site_id_new = get_site_id(cur, url, mode_new, freq)
-        if not site_id_new: return False
+        if not site_id_new:
+            return False
 
         # complain if we already use that site
         res = cur.execute(
@@ -726,9 +951,11 @@ def try_change_mode_for_notification(message, user_id, site_id_curr, url, freq, 
 
     return True
 
+
 def cmd_mode(update, context):
     uid = get_user_id(update.message)
-    if not uid: return
+    if not uid:
+        return
 
     global DB
     cmd = "/mode"
@@ -739,7 +966,8 @@ def cmd_mode(update, context):
     try:
         site_id = int(id_str)
     except Exception as ex:
-        reply_to_msg(update.message, True, f"invalid <id> '{cutoff(id_str, max_len=100)}'")
+        reply_to_msg(update.message, True,
+                     f"invalid <id> '{cutoff(id_str, max_len=100)}'")
         return
 
     mode_str = args[len(id_str):].strip()
@@ -771,7 +999,8 @@ def cmd_mode(update, context):
         reply_to_msg(update.message, True, f'site is already in this mode')
         return
 
-    if try_change_mode_for_notification(update.message, uid, site_id, url, freq, diff_mode): return
+    if try_change_mode_for_notification(update.message, uid, site_id, url, freq, diff_mode):
+        return
 
     DB.release()
     hash = get_site_hash(url, diff_mode)
@@ -782,10 +1011,12 @@ def cmd_mode(update, context):
         )
         return
 
-    if try_change_mode_for_notification(update.message, uid, site_id, url, freq, diff_mode): return
+    if try_change_mode_for_notification(update.message, uid, site_id, url, freq, diff_mode):
+        return
     cur = DB.aquire()
     try:
-        old_site_user_count = cur.execute("SELECT COUNT(*) FROM notifications WHERE site_id = ?", [site_id]).fetchone()[0]
+        old_site_user_count = cur.execute(
+            "SELECT COUNT(*) FROM notifications WHERE site_id = ?", [site_id]).fetchone()[0]
         if old_site_user_count == 1:
             # if nobody else uses the old site, change it over to the new mode
             cur.execute(
@@ -811,11 +1042,14 @@ def cmd_mode(update, context):
 
     reply_to_msg(update.message, True, f'successfully changed mode')
 
+
 def cmd_frequency(update, context):
     uid = get_user_id(update.message)
-    if not uid: return
+    if not uid:
+        return
 
     global DB
+    global SITE_POLLER
     global UPDATE_FREQUENCIES
     cmd = "/frequency"
     args = update.message.text
@@ -825,7 +1059,8 @@ def cmd_frequency(update, context):
     try:
         site_id = int(id_str)
     except Exception as ex:
-        reply_to_msg(update.message, True, f"invalid <id> '{cutoff(id_str, max_len=100)}'")
+        reply_to_msg(update.message, True,
+                     f"invalid <id> '{cutoff(id_str, max_len=100)}'")
         return
 
     freq_str = args[len(id_str):].strip()
@@ -857,7 +1092,8 @@ def cmd_frequency(update, context):
     url, mode, freq, hash = site_to_change
     mode = DiffMode.from_int(mode)
     if freq_new == freq:
-        reply_to_msg(update.message, True, f'site is already updating with this frequency')
+        reply_to_msg(update.message, True,
+                     f'site is already updating with this frequency')
         return
 
     try:
@@ -885,7 +1121,8 @@ def cmd_frequency(update, context):
                 "UPDATE notifications SET site_id = ? WHERE site_id = ? AND user_id = ?",
                 [site_id_new, site_id, uid]
             )
-            any_old_site_user = cur.execute("SELECT site_id FROM notifications WHERE site_id = ? LIMIT 1", [site_id]).fetchone()
+            any_old_site_user = cur.execute(
+                "SELECT site_id FROM notifications WHERE site_id = ? LIMIT 1", [site_id]).fetchone()
             if not any_old_site_user:
                 cur.execute("DELETE FROM sites WHERE id = ?", [site_id])
             DB.commit_release()
@@ -894,7 +1131,8 @@ def cmd_frequency(update, context):
             raise ex
     else:
         try:
-            old_site_user_count = cur.execute("SELECT COUNT(*) FROM notifications WHERE site_id = ?", [site_id]).fetchone()[0]
+            old_site_user_count = cur.execute(
+                "SELECT COUNT(*) FROM notifications WHERE site_id = ?", [site_id]).fetchone()[0]
             if old_site_user_count == 1:
                 # if nobody else uses the old site, change it over to the new frequency
                 cur.execute(
@@ -917,17 +1155,22 @@ def cmd_frequency(update, context):
         except Exception as ex:
             DB.rollback_release()
             raise ex
-    reply_to_msg(update.message, True, f'successfully changed update frequency')
+    reply_to_msg(update.message, True,
+                 f'successfully changed update frequency')
+    SITE_POLLER.async_poll_sites()
+
 
 def authorization_callback(update, cb_cmd, target_state, action_name):
     global ADMIN_USER_NAMES
     global DB
-    if update.callback_query.from_user.username not in ADMIN_USER_NAMES: return
+    if update.callback_query.from_user.username not in ADMIN_USER_NAMES:
+        return
     arg = str(update.callback_query.data)[len(cb_cmd):].strip()
     id = int(arg)
     try:
         cur = DB.aquire()
-        res = cur.execute("SELECT name, tg_chat_id, is_group, state FROM users  WHERE id = ?", [id]).fetchone()
+        res = cur.execute(
+            "SELECT name, tg_chat_id, is_group, state FROM users  WHERE id = ?", [id]).fetchone()
     except Exception as ex:
         DB.rollback_release()
         raise ex
@@ -940,28 +1183,36 @@ def authorization_callback(update, cb_cmd, target_state, action_name):
         update.callback_query.answer(f"outdated procedure!")
     elif state != UserState.UNAUTHORIZED:
         DB.release()
-        update.callback_query.answer(f"outdated procedure! {pretty_name(name, is_group)} is currently {state.to_string()}")
+        update.callback_query.answer(
+            f"outdated procedure! {pretty_name(name, is_group)} is currently {state.to_string()}")
     else:
         try:
-            cur.execute("UPDATE users SET state = ? WHERE id = ?", [target_state.to_int(), id])
+            cur.execute("UPDATE users SET state = ? WHERE id = ?",
+                        [target_state.to_int(), id])
             DB.commit_release()
         except Exception as ex:
             DB.rollback_release()
             raise ex
-        reply_to_msg(update.callback_query.message, False, f"{action_name} {pretty_name(name, is_group)}")
+        reply_to_msg(update.callback_query.message, False,
+                     f"{action_name} {pretty_name(name, is_group)}")
         if(target_state == UserState.AUTHORIZED):
-            BOT.bot.send_message(tg_chat_id, f"authorization granted to {pretty_name(name, is_group)}")
+            BOT.bot.send_message(
+                tg_chat_id, f"authorization granted to {pretty_name(name, is_group)}")
     update.callback_query.edit_message_reply_markup()
 
 
 def cb_authorize(update, context):
-    authorization_callback(update, "/authorize", UserState.AUTHORIZED, "authorized")
+    authorization_callback(update, "/authorize",
+                           UserState.AUTHORIZED, "authorized")
+
 
 def cb_block(update, context):
     authorization_callback(update, "/block", UserState.BLOCKED, "blocked")
 
+
 def cb_deny(update, context):
     authorization_callback(update, "/block", UserState.UNAUTHORIZED, "denied")
+
 
 def inform_site_changed(site_id, mode, new_hash):
     global DB
@@ -976,11 +1227,12 @@ def inform_site_changed(site_id, mode, new_hash):
                 INNER JOIN users ON notifications.user_id = users.id
                 WHERE sites.id = ?
             """,
-            [site_id]
-        )
+                    [site_id]
+                    )
         while True:
             res = cur.fetchone()
-            if not res: break
+            if not res:
+                break
             tg_chat_id, url = res
             if new_hash:
                 msg = cutoff("site changed:\n" + url)
@@ -989,6 +1241,7 @@ def inform_site_changed(site_id, mode, new_hash):
             BOT.bot.send_message(tg_chat_id, msg)
     finally:
         DB.release()
+
 
 def poll_site(site_id, url, mode, freq, old_hash):
     global DB
@@ -1011,11 +1264,13 @@ def poll_site(site_id, url, mode, freq, old_hash):
         new_hash = new_hash[0]
     else:
         new_hash = get_site_hash(url, mode)
-    if old_hash == new_hash: return
+    if old_hash == new_hash:
+        return
 
     try:
         cur = DB.aquire()
-        cur.execute("UPDATE sites SET hash = ? WHERE id = ?", [new_hash, site_id])
+        cur.execute("UPDATE sites SET hash = ? WHERE id = ?",
+                    [new_hash, site_id])
         DB.commit_release()
     except Exception as ex:
         DB.rollback_release()
@@ -1023,60 +1278,12 @@ def poll_site(site_id, url, mode, freq, old_hash):
 
     inform_site_changed(site_id, mode, new_hash)
 
-def poll_sites():
-    global CONFIG
-    global DB
-    global NUM_WORKER_THREADS
-    global UPDATE_INTERVAL_SECONDS
-    global TIMESTEP
-    smallest_frequency = min(UPDATE_FREQUENCIES.values())
-    thread_pool = ThreadPoolExecutor(NUM_WORKER_THREADS)
-    last_poll = datetime.datetime.now()
-    curr_seed = 0
-    while True:
-        now = datetime.datetime.now()
-        diff = now - last_poll
-        last_poll = now
-        secs_since_last = diff.total_seconds()
-        cur = DB.aquire()
-        query = cur.execute(
-            f"""
-                SELECT id, url, mode, frequency, hash, ((seed - ?) % frequency + frequency) % frequency AS delay
-                    FROM sites
-                    WHERE delay < ?
-                    ORDER BY delay ASC
-            """,
-            [curr_seed, secs_since_last]
-        )
-        while True:
-            res = query.fetchone()
-            if not res: break
-            site_id, url, mode, freq, hash, _delay = res
-            mode = DiffMode.from_int(mode)
-            thread_pool.submit(poll_site, site_id, url, mode, freq, hash)
-        curr_seed = (curr_seed + secs_since_last) % TIMESTEP
-        # more compact would be mod(mod(seed - curr_seed, update_interval_secs) + update_interval_secs, update_interval_secs)
-        # but not all instances of sqlite3 support the mod function
-        delay_to_next = cur.execute(
-            f"""
-                SELECT (CAST(seed - ? AS INTEGER) % frequency + frequency) % frequency + ABS((seed - ?) - CAST(seed - ? AS INTEGER)) AS delay
-                    FROM sites
-                    ORDER BY delay ASC
-                    LIMIT 1
-            """,
-            [curr_seed, curr_seed, curr_seed]
-        ).fetchone()
-        DB.release()
-        if not delay_to_next:
-            time.sleep(smallest_frequency * (random.random() * 0.9 + 0.1))
-        else:
-            delay = max(delay_to_next[0], 1)
-            time.sleep(delay)
 
 def setup_tg_bot():
     global CONFIG
     global BOT
-    BOT = Updater(CONFIG["bot_token"], use_context=True, workers=NUM_WORKER_THREADS)
+    BOT = Updater(CONFIG["bot_token"], use_context=True,
+                  workers=NUM_WORKER_THREADS)
 
     dp = BOT.dispatcher
     dp.add_handler(CommandHandler('start', cmd_start))
@@ -1095,6 +1302,7 @@ def setup_tg_bot():
     dp.add_handler(CallbackQueryHandler(cb_deny, pattern="^/deny"))
     dp.add_handler(CallbackQueryHandler(cb_block, pattern="^/block"))
     BOT.start_polling()
+
 
 def setup_db():
     global DB
@@ -1141,11 +1349,14 @@ def setup_db():
     assert(frequency_check[0] == 0)
 
 # lowest common multiple. not present in math before python 3.9
+
+
 def lcm(*integers):
     lcm = 1
     for i in integers:
         lcm = (lcm * i) // math.gcd(lcm, i)
     return lcm
+
 
 def setup_config():
     global INT_MAX
@@ -1156,7 +1367,8 @@ def setup_config():
 
     # the maximum number of characters before the url in /list
     global MAX_URL_PREFIX_LEN
-    MAX_URL_PREFIX_LEN = 4 + len(str((INT_MAX))) + 1 + 1 # 4 spaces + id name + colon + space
+    # 4 spaces + id name + colon + space
+    MAX_URL_PREFIX_LEN = 4 + len(str((INT_MAX))) + 1 + 1
 
     global STDIO_SUPPRESSION_FILE
     STDIO_SUPPRESSION_FILE = open(os.devnull, "w")
@@ -1196,7 +1408,13 @@ def setup_config():
         UPDATE_FREQUENCIES[name] = int(val)
 
     global UPDATE_FREQUENCY_NAMES
-    UPDATE_FREQUENCY_NAMES = {freq: name for name, freq in UPDATE_FREQUENCIES.items()}
+    UPDATE_FREQUENCY_NAMES = {freq: name for name,
+                              freq in UPDATE_FREQUENCIES.items()}
+
+    global LOG_LEVEL
+    LOG_LEVEL = LogLevel.WARN
+    if "log_level" in CONFIG:
+        LOG_LEVEL = LogLevel.from_string(CONFIG["log_level"])
 
     global DEFAULT_UPDATE_FREQUENCY
     DEFAULT_UPDATE_FREQUENCY = UPDATE_FREQUENCIES[CONFIG["default_update_frequency"]]
@@ -1207,13 +1425,15 @@ def setup_config():
         assert(isinstance(user, str))
         ADMIN_USER_NAMES.append(str(user))
 
-    global TIMESTEP
-    TIMESTEP = lcm(*UPDATE_FREQUENCIES.values())
-    assert(TIMESTEP < INT_MAX)
+
+def setup_site_poller():
+    global SITE_POLLER
+    SITE_POLLER = SitePoller()
+    SITE_POLLER.async_poll_sites()
+
 
 if __name__ == '__main__':
     setup_config()
     setup_db()
     setup_tg_bot()
-    poll_sites()
-
+    setup_site_poller()
