@@ -351,11 +351,15 @@ def extract_site(url, diff_mode):
         return None
 
 
-def get_site_hash(url, diff_mode):
-    content = extract_site(url, diff_mode)
+def hash_site_content(content):
     digest = hashlib.sha512(content).digest()
     digest = base64.b64encode(digest).decode("ascii")
     return digest
+
+
+def get_site_hash(url, diff_mode):
+    content = extract_site(url, diff_mode)
+    return hash_site_content(content)
 
 
 def cutoff(txt, rem_len_needed=0, max_len=telegram.MAX_MESSAGE_LENGTH):
@@ -1268,6 +1272,7 @@ def cmd_preview(update, context):
         return
 
     png = extract_site(url, diff_mode)
+    hash = hash_site_content(png)
     if not png:
         reply_to_msg(update.message, True, f'failed to generate preview')
         return
@@ -1276,7 +1281,7 @@ def cmd_preview(update, context):
             # imgkit sometimes produces size 0 pngs
             # we let telegram complain about those
             # maybe there is a better solution for this ?
-            update.message.reply_photo(png)
+            update.message.reply_photo(png, caption=f"hash: {hash}")
         except telegram.error.BadRequest:
             reply_to_msg(update.message, True,
                          f'failed to post preview, the image is probably broken')
