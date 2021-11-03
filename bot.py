@@ -1554,5 +1554,6 @@ def setup_site_poller():
 if __name__ == '__main__':
     setup_config()
     setup_db()
-    setup_tg_bot()
     setup_site_poller()
+    setup_tg_bot()
+    BOT.idle()
