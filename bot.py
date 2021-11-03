@@ -4,6 +4,7 @@ from math import ceil
 from re import match, split
 from sqlite3 import dbapi2
 from textwrap import dedent, indent
+from urllib.parse import urlencode, urlparse, unquote_plus
 import requests
 import json
 import base64
@@ -25,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from selenium import webdriver
 import selenium
 from selenium.webdriver import common
+from selenium.webdriver.common.by import By as SeleniumLookupBy
 
 import telegram  # pip3 install python-telegram-bot
 from telegram import (MessageEntity, InlineKeyboardButton)
@@ -252,38 +254,88 @@ class SitePoller:
             cd.close()
 
 
+def selenium_get_preferred_dimensions(driver):
+    dims = driver.execute_script(
+        'return [document.body.parentNode.scrollWidth, document.body.parentNode.scrollHeight]'
+    )
+    return (dims[0], dims[1])
+
+
 def get_site_png_selenium(url):
     global SITE_POLLER
-    global SELENIUM_DELAY_SECONDS
+    global SELENIUM_TEST_INTERVAL_SECONDS
+    global SELENIUM_TIMEOUT_SECONDS
+    global DEFAULT_SCREENSHOT_WIDTH
+    global DEFAULT_SCREENSHOT_HEIGHT
+
+    fragment = urlparse(url).fragment
+    by = SeleniumLookupBy.TAG_NAME
+    search_string = "body"
+    if fragment:
+        fragment = unquote_plus(fragment)
+        if len(fragment) > 0 and fragment[0] == "/":
+            by = SeleniumLookupBy.XPATH
+            search_string = fragment
+
     tid = threading.current_thread().ident
     if tid not in SITE_POLLER.chrome_drivers:
         options = webdriver.ChromeOptions()
         options.add_argument('--headless')
         options.add_argument('--no-sandbox')
+        options.add_argument("--incognito")
         driver = webdriver.Chrome(options=options,
                                   executable_path=r'chromedriver')
+        driver.set_page_load_timeout(SELENIUM_TIMEOUT_SECONDS)
         SITE_POLLER.chrome_drivers[tid] = driver
     else:
         driver = SITE_POLLER.chrome_drivers[tid]
+    driver.delete_all_cookies()
+    start = datetime.datetime.now()
 
     driver.get(url)
-    time.sleep(SELENIUM_DELAY_SECONDS)
-    global DEFAULT_SCREENSHOT_WIDTH
-    global DEFAULT_SCREENSHOT_HEIGHT
-    required_width = driver.execute_script(
-        'return document.body.parentNode.scrollWidth')
-    required_height = driver.execute_script(
-        'return document.body.parentNode.scrollHeight')
-
-    driver.set_window_size(
-        max(DEFAULT_SCREENSHOT_WIDTH, required_width),
-        max(DEFAULT_SCREENSHOT_HEIGHT, required_height)
+    required_width_1, required_height_1 = selenium_get_preferred_dimensions(
+        driver
     )
+    driver.set_window_size(
+        max(DEFAULT_SCREENSHOT_WIDTH, required_width_1),
+        max(DEFAULT_SCREENSHOT_HEIGHT, required_height_1)
+    )
+    required_width_1, required_height_1 = selenium_get_preferred_dimensions(
+        driver
+    )
+    print(str(required_width_1) + "|" + str(required_height_1))
+    png = None
+    prev_png = None
+    infiscroller = False
+    while True:
+        elements = driver.find_elements(by, value=search_string)
+        if elements:
+            png = elements[0].screenshot_as_png
+            if png == prev_png:
+                break
+        if (datetime.datetime.now() - start).total_seconds() > SELENIUM_TIMEOUT_SECONDS:
+            if elements:
+                log(LogLevel.INFO,
+                    f"selenium reached timeout before the screenshot stabilized: {url}"
+                    )
+            else:
+                log(LogLevel.INFO,
+                    f"selenium did not find selector target: {url}")
+            break
+        prev_png = png
+        time.sleep(SELENIUM_TEST_INTERVAL_SECONDS)
+        if not infiscroller:
+            required_width_2, required_height_2 = \
+                selenium_get_preferred_dimensions(driver)
 
-    body = driver.find_element(
-        selenium.webdriver.common.by.By.TAG_NAME, value="body")
-    png = body.screenshot_as_png
-
+            if required_width_2 != required_width_1 or required_height_2 != required_height_1:
+                infiscroller = True
+                log(LogLevel.INFO,
+                    f"selenium detected an infiniscroller: {url}")
+                driver.set_window_size(
+                    DEFAULT_SCREENSHOT_WIDTH,
+                    DEFAULT_SCREENSHOT_HEIGHT,
+                )
     return png
 
 
@@ -292,7 +344,8 @@ def get_site_png_imgkit(url):
     # suppress uselesss 'Rendering...' etc. console output
     # from imgkit
     with contextlib.redirect_stdout(STDIO_SUPPRESSION_FILE):
-        content = imgkit.from_url(url, False, options={"--format": "png"})
+        content = imgkit.from_url(
+            url, False, options={"--format": "png", "--disable-javascript": None})
     return content
 
 
@@ -597,7 +650,7 @@ def cmd_help(update, context):
 
         MODES:
             selenium                     the diff is based on a full page screenshot rendered using selenium {default_mode(DiffMode.SELENIUM)}
-            imgkit                       the diff is based on an image of the site rendered using imgkit {default_mode(DiffMode.IMGKIT)}
+            imgkit                       the diff is based on an image of the site rendered using imgkit (no js) {default_mode(DiffMode.IMGKIT)}
             html                         the diff is based on the raw html of the site {default_mode(DiffMode.HTML)}
 
         FREQUENCIES:
@@ -1548,10 +1601,16 @@ def setup_config():
     if "default_screenshot_height" in CONFIG:
         DEFAULT_SCREENSHOT_HEIGHT = int(CONFIG["default_screenshot_height"])
 
-    global SELENIUM_DELAY_SECONDS
-    SELENIUM_DELAY_SECONDS = 3
-    if "selenium_delay_seconds" in CONFIG:
-        SELENIUM_DELAY_SECONDS = float(CONFIG["selenium_delay_seconds"])
+    global SELENIUM_TEST_INTERVAL_SECONDS
+    SELENIUM_TEST_INTERVAL_SECONDS = 3
+    if "selenium_test_interval_seconds" in CONFIG:
+        SELENIUM_TEST_INTERVAL_SECONDS = float(
+            CONFIG["selenium_test_interval_seconds"])
+
+    global SELENIUM_TIMEOUT_SECONDS
+    SELENIUM_TIMEOUT_SECONDS = 10
+    if "selenium_timeout_seconds" in CONFIG:
+        SELENIUM_TIMEOUT_SECONDS = float(CONFIG["selenium_timeout_seconds"])
 
     global UPDATE_FREQUENCIES
     UPDATE_FREQUENCIES = {}

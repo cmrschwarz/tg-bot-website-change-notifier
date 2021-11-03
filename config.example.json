@@ -17,5 +17,6 @@
     "log_level": "warn",
     "default_screenshot_width": 1920,
     "default_screenshot_height": 1080,
-    "selenium_delay_seconds": 3
+    "selenium_test_interval_seconds": 0.3,
+    "selenium_timeout_seconds": 10
 }
