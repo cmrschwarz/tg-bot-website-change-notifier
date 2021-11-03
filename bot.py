@@ -250,7 +250,7 @@ class SitePoller:
 
     def close(self):
         self.thread_pool.shutdown(True)
-        for cd in self.chrome_drivers:
+        for cd in self.chrome_drivers.values():
             cd.close()
 
 
@@ -267,6 +267,8 @@ def get_site_png_selenium(url):
     global SELENIUM_TIMEOUT_SECONDS
     global DEFAULT_SCREENSHOT_WIDTH
     global DEFAULT_SCREENSHOT_HEIGHT
+    global MAX_SCREENSHOT_WIDTH
+    global MAX_SCREENSHOT_HEIGHT
     url_to_get = url
     by = SeleniumLookupBy.TAG_NAME
     search_string = "body"
@@ -292,25 +294,28 @@ def get_site_png_selenium(url):
         driver = SITE_POLLER.chrome_drivers[tid]
     driver.delete_all_cookies()
     start = datetime.datetime.now()
-
+    log(LogLevel.DEBUG, f"getting: {url_to_get}")
     driver.get(url_to_get)
     required_width_1, required_height_1 = selenium_get_preferred_dimensions(
         driver
     )
-    driver.set_window_size(
-        max(DEFAULT_SCREENSHOT_WIDTH, required_width_1),
-        max(DEFAULT_SCREENSHOT_HEIGHT, required_height_1)
-    )
+    width = min(max(DEFAULT_SCREENSHOT_WIDTH, required_width_1),
+                MAX_SCREENSHOT_WIDTH)
+    height = min(max(DEFAULT_SCREENSHOT_HEIGHT,
+                 required_height_1), MAX_SCREENSHOT_HEIGHT)
+    driver.set_window_size(width, height)
+    # changing the window size might change the preferences
     required_width_1, required_height_1 = selenium_get_preferred_dimensions(
         driver
     )
-    print(str(required_width_1) + "|" + str(required_height_1))
     png = None
     prev_png = None
     infiscroller = False
     while True:
         elements = driver.find_elements(by, value=search_string)
         if elements:
+            log(LogLevel.DEBUG,
+                f"screenshotting ({width}x{height}, wanted {required_width_1, required_height_1}): {url_to_get}")
             png = elements[0].screenshot_as_png
             if png == prev_png:
                 break
@@ -331,7 +336,7 @@ def get_site_png_selenium(url):
 
             if required_width_2 != required_width_1 or required_height_2 != required_height_1:
                 infiscroller = True
-                log(LogLevel.INFO,
+                log(LogLevel.DEBUG,
                     f"selenium detected an infiniscroller: {url}")
                 driver.set_window_size(
                     DEFAULT_SCREENSHOT_WIDTH,
@@ -1598,7 +1603,7 @@ def setup_config():
             NUM_WORKER_THREADS = nwt
 
     global DEFAULT_SCREENSHOT_WIDTH
-    DEFAULT_SCREENSHOT_WIDTH = 1920
+    DEFAULT_SCREENSHOT_WIDTH = 720
     if "default_screenshot_width" in CONFIG:
         DEFAULT_SCREENSHOT_WIDTH = int(CONFIG["default_screenshot_width"])
 
@@ -1606,6 +1611,16 @@ def setup_config():
     DEFAULT_SCREENSHOT_HEIGHT = 1080
     if "default_screenshot_height" in CONFIG:
         DEFAULT_SCREENSHOT_HEIGHT = int(CONFIG["default_screenshot_height"])
+
+    global MAX_SCREENSHOT_WIDTH
+    MAX_SCREENSHOT_WIDTH = 1920
+    if "max_screenshot_width" in CONFIG:
+        MAX_SCREENSHOT_WIDTH = int(CONFIG["max_screenshot_width"])
+
+    global MAX_SCREENSHOT_HEIGHT
+    MAX_SCREENSHOT_HEIGHT = 4096
+    if "max_screenshot_height" in CONFIG:
+        MAX_SCREENSHOT_HEIGHT = int(CONFIG["max_screenshot_height"])
 
     global SELENIUM_TEST_INTERVAL_SECONDS
     SELENIUM_TEST_INTERVAL_SECONDS = 3

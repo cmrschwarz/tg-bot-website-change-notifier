@@ -15,8 +15,10 @@
     },
     "default_update_frequency": "hourly",
     "log_level": "warn",
-    "default_screenshot_width": 1920,
+    "default_screenshot_width": 720,
     "default_screenshot_height": 1080,
-    "selenium_test_interval_seconds": 0.3,
+    "max_screenshot_width": 1920,
+    "max_screenshot_height": 4096,
+    "selenium_test_interval_seconds": 1,
     "selenium_timeout_seconds": 10
 }
