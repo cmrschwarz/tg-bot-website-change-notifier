@@ -254,6 +254,7 @@ class SitePoller:
 
 def get_site_png_selenium(url):
     global SITE_POLLER
+    global SELENIUM_DELAY_SECONDS
     tid = threading.current_thread().ident
     if tid not in SITE_POLLER.chrome_drivers:
         options = webdriver.ChromeOptions()
@@ -266,6 +267,7 @@ def get_site_png_selenium(url):
         driver = SITE_POLLER.chrome_drivers[tid]
 
     driver.get(url)
+    time.sleep(SELENIUM_DELAY_SECONDS)
     global DEFAULT_SCREENSHOT_WIDTH
     global DEFAULT_SCREENSHOT_HEIGHT
     required_width = driver.execute_script(
@@ -446,6 +448,9 @@ def pretty_name(name, is_group):
 
 
 def get_user_id(message, need_admin=False, full_output=False):
+    if not message:
+        # this happens e.g. if the update is an edit of a previous message
+        return None
     # todo update changed usernames
     global DB
     global BOT
@@ -1540,6 +1545,11 @@ def setup_config():
     DEFAULT_SCREENSHOT_HEIGHT = 1080
     if "default_screenshot_height" in CONFIG:
         DEFAULT_SCREENSHOT_HEIGHT = int(CONFIG["default_screenshot_height"])
+
+    global SELENIUM_DELAY_SECONDS
+    SELENIUM_DELAY_SECONDS = 3
+    if "selenium_delay_seconds" in CONFIG:
+        SELENIUM_DELAY_SECONDS = float(CONFIG["selenium_delay_seconds"])
 
     global UPDATE_FREQUENCIES
     UPDATE_FREQUENCIES = {}

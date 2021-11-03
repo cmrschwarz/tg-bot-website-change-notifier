@@ -16,5 +16,6 @@
     "default_update_frequency": "hourly",
     "log_level": "warn",
     "default_screenshot_width": 1920,
-    "default_screenshot_height": 1080
+    "default_screenshot_height": 1080,
+    "selenium_delay_seconds": 3
 }
