@@ -21,6 +21,10 @@ import sys
 from url_normalize import url_normalize  # pip3 install url_normalize
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
+# pip3 install selenium, apt install chromium-driver
+from selenium import webdriver
+import selenium
+from selenium.webdriver import common
 
 import telegram  # pip3 install python-telegram-bot
 from telegram import (MessageEntity, InlineKeyboardButton)
@@ -31,7 +35,8 @@ from telegram.inline.inlinekeyboardmarkup import InlineKeyboardMarkup
 
 class DiffMode(Enum):
     HTML = (0, "html")
-    RENDER = (1, "render")
+    IMGKIT = (1, "imgkit")
+    SELENIUM = (2, "selenium")
 
     def to_string(self):
         return self.value[1]
@@ -194,50 +199,51 @@ class SitePoller:
         self.last_poll = now
         secs_since_last = diff.total_seconds()
         cur = DB.aquire()
-        query = cur.execute(
-            f"""
-                SELECT id, url, mode, frequency, hash, ((seed - ?) % frequency + frequency) % frequency AS delay
-                    FROM sites
-                    WHERE delay < ?
-                    ORDER BY delay ASC
-            """,
-            [self.last_seed, secs_since_last]
-        )
-        while True:
-            res = query.fetchone()
-            if not res:
-                break
-            site_id, url, mode, freq, hash, _delay = res
-            mode = DiffMode.from_int(mode)
-            self.thread_pool.submit(
-                poll_site, site_id, url, mode, freq, hash)
-        self.last_seed = (self.last_seed + secs_since_last) % self.timestep
-        # more compact would be mod(mod(seed - curr_seed, update_interval_secs) + update_interval_secs, update_interval_secs)
-        # but not all instances of sqlite3 support the mod function
-        delay_to_next = cur.execute(
-            f"""
-                SELECT (CAST(seed - ? AS INTEGER) % frequency + frequency) % frequency + ABS((seed - ?) - CAST(seed - ? AS INTEGER)) AS delay
-                    FROM sites
-                    ORDER BY delay ASC
-                    LIMIT 1
-            """,
-            [self.last_seed] * 3
-        ).fetchone()
-        DB.release()
+        try:
+            query = cur.execute(
+                f"""
+                    SELECT id, url, mode, frequency, hash, ((seed - ?) % frequency + frequency) % frequency AS delay
+                        FROM sites
+                        WHERE delay < ?
+                        ORDER BY delay ASC
+                """,
+                [self.last_seed, secs_since_last]
+            )
+            while True:
+                res = query.fetchone()
+                if not res:
+                    break
+                site_id, url, mode, freq, hash, _delay = res
+                mode = DiffMode.from_int(mode)
+                self.thread_pool.submit(
+                    poll_site, site_id, url, mode, freq, hash)
+            self.last_seed = (self.last_seed + secs_since_last) % self.timestep
+            # more compact would be mod(mod(seed - curr_seed, update_interval_secs) + update_interval_secs, update_interval_secs)
+            # but not all instances of sqlite3 support the mod function
+            delay_to_next = cur.execute(
+                f"""
+                    SELECT (CAST(seed - ? AS INTEGER) % frequency + frequency) % frequency + ABS((seed - ?) - CAST(seed - ? AS INTEGER)) AS delay
+                        FROM sites
+                        ORDER BY delay ASC
+                        LIMIT 1
+                """,
+                [self.last_seed] * 3
+            ).fetchone()
+        finally:
+            DB.release()
 
         if not delay_to_next:
             self.delay_to_next = self.timestep
-            log(LogLevel.DEBUG,
-                f"scheduled poll in {self.delay_to_next} seconds")
         else:
             self.delay_to_next = max(delay_to_next[0], 1)
 
     def setup_timer_under_lock(self):
-        if self.delay_to_next:
-            self.timer = threading.Timer(
-                self.delay_to_next, self.scheduled_poll_sites
-            )
-            self.timer.start()
+        self.timer = threading.Timer(
+            self.delay_to_next, self.scheduled_poll_sites
+        )
+        self.timer.start()
+        log(LogLevel.DEBUG,
+            f"scheduled poll in {self.delay_to_next} seconds")
 
     def scheduled_poll_sites(self):
         self.lock.acquire()
@@ -264,19 +270,50 @@ class SitePoller:
             self.lock.release()
 
 
+def get_site_png_selenium(url):
+    options = webdriver.ChromeOptions()
+    options.add_argument('--headless')
+    options.add_argument('--no-sandbox')
+    driver = webdriver.Chrome(options=options,
+                              executable_path=r'chromedriver')
+    driver.get(url)
+    global DEFAULT_SCREENSHOT_WIDTH
+    global DEFAULT_SCREENSHOT_HEIGHT
+    required_width = driver.execute_script(
+        'return document.body.parentNode.scrollWidth')
+    required_height = driver.execute_script(
+        'return document.body.parentNode.scrollHeight')
+
+    driver.set_window_size(
+        max(DEFAULT_SCREENSHOT_WIDTH, required_width),
+        max(DEFAULT_SCREENSHOT_HEIGHT, required_height)
+    )
+
+    body = driver.find_element(
+        selenium.webdriver.common.by.By.TAG_NAME, value="body")
+    png = body.screenshot_as_png
+
+    driver.close()
+    return png
+
+
 def get_site_hash(url, diff_mode):
-    global STDIO_SUPPRESSION_FILE
+
     log(LogLevel.INFO,
         f"accessing site in {diff_mode.to_string()} mode: {url}")
     try:
-        if diff_mode == DiffMode.RENDER:
+        if diff_mode == DiffMode.SELENIUM:
+            content = get_site_png_selenium(url)
+        elif diff_mode == DiffMode.IMGKIT:
+            global STDIO_SUPPRESSION_FILE
             # suppress uselesss 'Rendering...' etc. console output
             # from imgkit
             with contextlib.redirect_stdout(STDIO_SUPPRESSION_FILE):
                 content = imgkit.from_url(url, False)
-        else:
-            assert(diff_mode == DiffMode.HTML)
+        elif diff_mode == DiffMode.HTML:
             content = requests.get(url).content
+        else:
+            assert False,  "unsupported diff mode"
         digest = hashlib.sha512(content).digest()
         digest = base64.b64encode(digest).decode("ascii")
         return digest
@@ -522,7 +559,8 @@ def cmd_help(update, context):
             /frequency <id> <frequency>  change the update frequency for a site
 
         MODES:
-            render                       the diff is based on an image of the site rendered using imgkit {default_mode(DiffMode.RENDER)}
+            selenium                     the diff is based on a full page screenshot rendered using selenium {default_mode(DiffMode.SELENIUM)}
+            imgkit                       the diff is based on an image of the site rendered using imgkit {default_mode(DiffMode.IMGKIT)}
             html                         the diff is based on the raw html of the site {default_mode(DiffMode.HTML)}
 
         FREQUENCIES:
@@ -918,6 +956,7 @@ def try_change_mode_for_notification(message, user_id, site_id_curr, url, freq, 
         # check if site with changed config already exists
         site_id_new = get_site_id(cur, url, mode_new, freq)
         if not site_id_new:
+            cur = DB.release()
             return False
 
         # complain if we already use that site
@@ -930,6 +969,7 @@ def try_change_mode_for_notification(message, user_id, site_id_curr, url, freq, 
                 message, True,
                 f'already tracking this url in {mode_new.to_string()} mode with id {res[0]}',
             )
+            cur = DB.release()
             return True
 
         # swap over to use that site
@@ -1401,6 +1441,16 @@ def setup_config():
         nwt = int(CONFIG["num_worker_threads"])
         if nwt > 0:
             NUM_WORKER_THREADS = nwt
+
+    global DEFAULT_SCREENSHOT_WIDTH
+    DEFAULT_SCREENSHOT_WIDTH = 1920
+    if "default_screenshot_width" in CONFIG:
+        DEFAULT_SCREENSHOT_WIDTH = int(CONFIG["default_screenshot_width"])
+
+    global DEFAULT_SCREENSHOT_HEIGHT
+    DEFAULT_SCREENSHOT_HEIGHT = 1080
+    if "default_screenshot_height" in CONFIG:
+        DEFAULT_SCREENSHOT_HEIGHT = int(CONFIG["default_screenshot_height"])
 
     global UPDATE_FREQUENCIES
     UPDATE_FREQUENCIES = {}
