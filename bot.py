@@ -135,7 +135,6 @@ class Database:
 
 
 def log(level, text):
-    level = LogLevel.DEBUG
     global LOG_LEVEL
     if level < LOG_LEVEL:
         return
@@ -157,6 +156,7 @@ class SitePoller:
         self.lock = threading.Lock()
         self.timer = None
         self.delay_to_next = 0
+        self.chrome_drivers = {}
         # if we used min instead of now(), on a restart all pages would
         # be polled immediately, potentially causing lots of load
         # this way we ease in using the normal frequency + seed distribution
@@ -246,13 +246,25 @@ class SitePoller:
         finally:
             self.lock.release()
 
+    def close(self):
+        self.thread_pool.shutdown(True)
+        for cd in self.chrome_drivers:
+            cd.close()
+
 
 def get_site_png_selenium(url):
-    options = webdriver.ChromeOptions()
-    options.add_argument('--headless')
-    options.add_argument('--no-sandbox')
-    driver = webdriver.Chrome(options=options,
-                              executable_path=r'chromedriver')
+    global SITE_POLLER
+    tid = threading.current_thread().ident
+    if tid not in SITE_POLLER.chrome_drivers:
+        options = webdriver.ChromeOptions()
+        options.add_argument('--headless')
+        options.add_argument('--no-sandbox')
+        driver = webdriver.Chrome(options=options,
+                                  executable_path=r'chromedriver')
+        SITE_POLLER.chrome_drivers[tid] = driver
+    else:
+        driver = SITE_POLLER.chrome_drivers[tid]
+
     driver.get(url)
     global DEFAULT_SCREENSHOT_WIDTH
     global DEFAULT_SCREENSHOT_HEIGHT
@@ -270,7 +282,6 @@ def get_site_png_selenium(url):
         selenium.webdriver.common.by.By.TAG_NAME, value="body")
     png = body.screenshot_as_png
 
-    driver.close()
     return png
 
 
@@ -320,7 +331,10 @@ def extract_site(url, diff_mode):
     log(LogLevel.INFO,
         f"accessing site in {diff_mode.to_string()} mode: {url}")
     try:
-        return diff_mode.get_extractor()(url)
+        result = diff_mode.get_extractor()(url)
+        log(LogLevel.DEBUG,
+            f"successfully loaded site in {diff_mode.to_string()} mode: {url}")
+        return result
     except Exception as ex:
         err_msg = str(ex)
         log(LogLevel.ERROR, f"failed to load '{url}':\n"
@@ -1557,3 +1571,4 @@ if __name__ == '__main__':
     setup_site_poller()
     setup_tg_bot()
     BOT.idle()
+    SITE_POLLER.close()
