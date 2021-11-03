@@ -4,7 +4,7 @@ from math import ceil
 from re import match, split
 from sqlite3 import dbapi2
 from textwrap import dedent, indent
-from urllib.parse import urlencode, urlparse, unquote_plus
+from urllib.parse import urldefrag, urlencode, urlparse, unquote_plus, unquote, urlunparse
 import requests
 import json
 import base64
@@ -267,15 +267,16 @@ def get_site_png_selenium(url):
     global SELENIUM_TIMEOUT_SECONDS
     global DEFAULT_SCREENSHOT_WIDTH
     global DEFAULT_SCREENSHOT_HEIGHT
-
-    fragment = urlparse(url).fragment
+    url_to_get = url
     by = SeleniumLookupBy.TAG_NAME
     search_string = "body"
+    url_defrag, fragment = urldefrag(url)
     if fragment:
         fragment = unquote_plus(fragment)
         if len(fragment) > 0 and fragment[0] == "/":
             by = SeleniumLookupBy.XPATH
             search_string = fragment
+            url_to_get = url_defrag
 
     tid = threading.current_thread().ident
     if tid not in SITE_POLLER.chrome_drivers:
@@ -292,7 +293,7 @@ def get_site_png_selenium(url):
     driver.delete_all_cookies()
     start = datetime.datetime.now()
 
-    driver.get(url)
+    driver.get(url_to_get)
     required_width_1, required_height_1 = selenium_get_preferred_dimensions(
         driver
     )
@@ -642,16 +643,20 @@ def cmd_help(update, context):
         COMMANDS:
             /help                        print this menu
             /list                        list all currently tracked sites and their ids
-            /preview <id>                show the render of a site that is used for generating it's diff
+            /preview <id>                render the site like it would be during diff generation
             /add <url>                   add a new site to track
             /remove <id>                 remove a site
             /mode <id> <mode>            change the update detection method for a site
             /frequency <id> <frequency>  change the update frequency for a site
 
         MODES:
-            selenium                     the diff is based on a full page screenshot rendered using selenium {default_mode(DiffMode.SELENIUM)}
-            imgkit                       the diff is based on an image of the site rendered using imgkit (no js) {default_mode(DiffMode.IMGKIT)}
-            html                         the diff is based on the raw html of the site {default_mode(DiffMode.HTML)}
+            selenium                     diff based on a selenium screenshot of the site, 
+                                         url fragments starting with #/ are interpreted as an xpath to narrow
+                                         down the screenshot {default_mode(DiffMode.SELENIUM)}
+                                         
+            imgkit                       diff based on an imgkit render of the site with js disabled {default_mode(DiffMode.IMGKIT)}
+
+            html                         diff based on the raw html of the site {default_mode(DiffMode.HTML)}
 
         FREQUENCIES:
 
@@ -901,7 +906,8 @@ def cmd_add(update, context):
         cmd = "/add"
         assert(url[0:4] == cmd)
         url = url[len(cmd):].strip()
-        url = url_normalize(url)
+        url_decoded = unquote_plus(url)
+        url = url_normalize(url_decoded)
         if len(url) > MAX_URL_LEN:
             reply_to_msg(update.message, True,
                          f'url is too long (limit is set to {MAX_URL_LEN}), refusing to track')
