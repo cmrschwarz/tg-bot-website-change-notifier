@@ -923,12 +923,13 @@ def cmd_add(update, context):
         raise ex
 
     if notif_added:
-        reply_to_msg(update.message, True, f'now tracking this url')
+        reply_to_msg(update.message, True,
+                     f'now tracking this url (id {site_id})')
         SITE_POLLER.async_poll_sites()
     else:
         reply_to_msg(
             update.message, True,
-            f"already tracking this url in {DiffMode.from_int(prev_mode).to_string()} mode " +
+            f"already tracking this url  (id {site_id}) in {DiffMode.from_int(prev_mode).to_string()} mode " +
             f"[{UPDATE_FREQUENCY_NAMES[prev_freq]}]"
         )
 
