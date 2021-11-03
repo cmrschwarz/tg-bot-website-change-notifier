@@ -136,7 +136,7 @@ class Database:
 
 def log(level, text):
     global LOG_LEVEL
-    if level < LOG_LEVEL:
+    if LOG_LEVEL < level:
         return
     time_str = datetime.datetime.now().isoformat(sep=' ', timespec='seconds')
     if level == LOG_LEVEL.ERROR:
@@ -330,11 +330,11 @@ class DiffMode(Enum):
 
 
 def extract_site(url, diff_mode):
-    log(LogLevel.INFO,
+    log(LogLevel.DEBUG,
         f"accessing site in {diff_mode.to_string()} mode: {url}")
     try:
         result = diff_mode.get_extractor()(url)
-        log(LogLevel.DEBUG,
+        log(LogLevel.INFO,
             f"successfully loaded site in {diff_mode.to_string()} mode: {url}")
         return result
     except Exception as ex:
@@ -354,6 +354,8 @@ def extract_site(url, diff_mode):
 
 
 def hash_site_content(content):
+    if not content:
+        return None
     digest = hashlib.sha512(content).digest()
     digest = base64.b64encode(digest).decode("ascii")
     return digest
