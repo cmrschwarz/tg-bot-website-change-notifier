@@ -33,29 +33,6 @@ from telegram.ext import (Updater, CommandHandler, CallbackQueryHandler)
 from telegram.inline.inlinekeyboardmarkup import InlineKeyboardMarkup
 
 
-class DiffMode(Enum):
-    HTML = (0, "html")
-    IMGKIT = (1, "imgkit")
-    SELENIUM = (2, "selenium")
-
-    def to_string(self):
-        return self.value[1]
-
-    def to_int(self):
-        return self.value[0]
-
-    def from_int(i):
-        for dm in DiffMode:
-            if dm.to_int() == i:
-                return dm
-
-    def from_string(s):
-        s = s.lower()
-        for dm in DiffMode:
-            if dm.to_string() == s:
-                return dm
-
-
 class UserState(Enum):
     UNAUTHORIZED = (0, "unauthorized")
     AUTHORIZED = (1, "authorized")
@@ -297,26 +274,53 @@ def get_site_png_selenium(url):
     return png
 
 
-def get_site_hash(url, diff_mode):
+def get_site_png_imgkit(url):
+    global STDIO_SUPPRESSION_FILE
+    # suppress uselesss 'Rendering...' etc. console output
+    # from imgkit
+    with contextlib.redirect_stdout(STDIO_SUPPRESSION_FILE):
+        content = imgkit.from_url(url, False, options={"--format": "png"})
+    return content
 
+
+def get_site_html(url):
+    return requests.get(url).content
+
+
+class DiffMode(Enum):
+    HTML = (0, "html", get_site_html, False)
+    IMGKIT = (1, "imgkit", get_site_png_imgkit, True)
+    SELENIUM = (2, "selenium", get_site_png_selenium, True)
+
+    def to_string(self):
+        return self.value[1]
+
+    def to_int(self):
+        return self.value[0]
+
+    def get_extractor(self):
+        return self.value[2]
+
+    def is_previewable(self):
+        return self.value[3]
+
+    def from_int(i):
+        for dm in DiffMode:
+            if dm.to_int() == i:
+                return dm
+
+    def from_string(s):
+        s = s.lower()
+        for dm in DiffMode:
+            if dm.to_string() == s:
+                return dm
+
+
+def extract_site(url, diff_mode):
     log(LogLevel.INFO,
         f"accessing site in {diff_mode.to_string()} mode: {url}")
     try:
-        if diff_mode == DiffMode.SELENIUM:
-            content = get_site_png_selenium(url)
-        elif diff_mode == DiffMode.IMGKIT:
-            global STDIO_SUPPRESSION_FILE
-            # suppress uselesss 'Rendering...' etc. console output
-            # from imgkit
-            with contextlib.redirect_stdout(STDIO_SUPPRESSION_FILE):
-                content = imgkit.from_url(url, False)
-        elif diff_mode == DiffMode.HTML:
-            content = requests.get(url).content
-        else:
-            assert False,  "unsupported diff mode"
-        digest = hashlib.sha512(content).digest()
-        digest = base64.b64encode(digest).decode("ascii")
-        return digest
+        return diff_mode.get_extractor()(url)
     except Exception as ex:
         err_msg = str(ex)
         log(LogLevel.ERROR, f"failed to load '{url}':\n"
@@ -331,6 +335,13 @@ def get_site_hash(url, diff_mode):
             )
             )
         return None
+
+
+def get_site_hash(url, diff_mode):
+    content = extract_site(url, diff_mode)
+    digest = hashlib.sha512(content).digest()
+    digest = base64.b64encode(digest).decode("ascii")
+    return digest
 
 
 def cutoff(txt, rem_len_needed=0, max_len=telegram.MAX_MESSAGE_LENGTH):
@@ -553,6 +564,7 @@ def cmd_help(update, context):
         COMMANDS:
             /help                        print this menu
             /list                        list all currently tracked sites and their ids
+            /preview <id>                show the render of a site that is used for generating it's diff
             /add <url>                   add a new site to track
             /remove <id>                 remove a site
             /mode <id> <mode>            change the update detection method for a site
@@ -1200,6 +1212,62 @@ def cmd_frequency(update, context):
     SITE_POLLER.async_poll_sites()
 
 
+def cmd_preview(update, context):
+    uid = get_user_id(update.message)
+    if not uid:
+        return
+
+    global DB
+    global SITE_POLLER
+    global UPDATE_FREQUENCIES
+    cmd = "/preview"
+    args = update.message.text
+    assert(args[0:len(cmd)] == cmd)
+    args = args[len(cmd):].strip()
+    id_str = args.split()[0]
+    try:
+        site_id = int(id_str)
+    except Exception as ex:
+        reply_to_msg(update.message, True,
+                     f"invalid <id> '{cutoff(id_str, max_len=100)}'")
+        return
+
+    cur = DB.aquire()
+    try:
+        uid = get_user_id(update.message)
+        site_to_preview = cur.execute(
+            "SELECT url, mode FROM notifications INNER JOIN sites ON id = site_id WHERE site_id = ? AND user_id = ?",
+            [site_id, uid]
+        ).fetchone()
+    finally:
+        DB.release()
+
+    if not site_to_preview:
+        reply_to_msg(update.message, True, f'no site with that id present')
+        return
+
+    url, diff_mode = site_to_preview
+    diff_mode = DiffMode.from_int(diff_mode)
+    if not diff_mode.is_previewable():
+        reply_to_msg(update.message, True,
+                     f'sites is in {diff_mode.to_string()} mode which is not previewable')
+        return
+
+    png = extract_site(url, diff_mode)
+    if not png:
+        reply_to_msg(update.message, True, f'failed to generate preview')
+        return
+    if png:
+        try:
+            # imgkit sometimes produces size 0 pngs
+            # we let telegram complain about those
+            # maybe there is a better solution for this ?
+            update.message.reply_photo(png)
+        except telegram.error.BadRequest:
+            reply_to_msg(update.message, True,
+                         f'failed to post preview, the image is probably broken')
+
+
 def authorization_callback(update, cb_cmd, target_state, action_name):
     global ADMIN_USER_NAMES
     global DB
@@ -1333,6 +1401,7 @@ def setup_tg_bot():
     dp.add_handler(CommandHandler('remove', cmd_remove))
     dp.add_handler(CommandHandler('mode', cmd_mode))
     dp.add_handler(CommandHandler('frequency', cmd_frequency))
+    dp.add_handler(CommandHandler('preview', cmd_preview))
     dp.add_handler(CommandHandler('whoami', cmd_whoami))
     dp.add_handler(CommandHandler('listusers', cmd_listusers))
     dp.add_handler(CommandHandler('listall', cmd_listall))
