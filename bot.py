@@ -671,6 +671,7 @@ def cmd_help(update, context):
         COMMANDS:
             /help                        print this menu
             /list                        list all currently tracked sites and their ids
+            /listdec                     list all currently tracked sites (url decoded) and their ids
             /preview <id>                render the site like it would be during diff generation
             /add <url>                   add a new site to track
             /remove <id>                 remove a site
@@ -812,7 +813,7 @@ def cmd_siteinfo(update, context):
     reply_to_msg(update.message, True, "not implemented yet :/")
 
 
-def cmd_list(update, context):
+def cmd_list(update, context, urldecode=False):
     uid = get_user_id(update.message)
     if not uid:
         return
@@ -874,9 +875,15 @@ def cmd_list(update, context):
                 entity_ends.append(len(entities))
         sitelist += mode.to_string() + " mode [" + freq + "]:\n"
         for id, url in sites:
+            if urldecode:
+                url = unquote_plus(url)
             line = f"    {' ' * (longest_id - len(id)) + id}: {url}\n"
-            entities.append(MessageEntity(MessageEntity.URL, len(
-                sitelist) + line_prefix_len, len(line) - line_prefix_len))
+            url_start = len(sitelist) + line_prefix_len
+            url_length = len(line) - line_prefix_len
+            entities.append(MessageEntity(
+                MessageEntity.CODE if urldecode else MessageEntity.URL,
+                url_start, url_length
+            ))
             line_len = len(line)
             while len(sitelist) + line_len > telegram.MAX_MESSAGE_LENGTH:
                 single_reply = False
@@ -1510,6 +1517,8 @@ def setup_tg_bot():
     dp.add_handler(CommandHandler('start', cmd_start))
     dp.add_handler(CommandHandler('help', cmd_help))
     dp.add_handler(CommandHandler('list', cmd_list))
+    dp.add_handler(CommandHandler('listdec', lambda update,
+                   context: cmd_list(update, context, urldecode=True)))
     dp.add_handler(CommandHandler('add', cmd_add))
     dp.add_handler(CommandHandler('remove', cmd_remove))
     dp.add_handler(CommandHandler('mode', cmd_mode))
@@ -1520,6 +1529,7 @@ def setup_tg_bot():
     dp.add_handler(CommandHandler('listall', cmd_listall))
     dp.add_handler(CommandHandler('userstate', cmd_userstate))
     dp.add_handler(CommandHandler('siteinfo', cmd_siteinfo))
+
     dp.add_handler(CallbackQueryHandler(cb_authorize, pattern="^/authorize"))
     dp.add_handler(CallbackQueryHandler(cb_deny, pattern="^/deny"))
     dp.add_handler(CallbackQueryHandler(cb_block, pattern="^/block"))
