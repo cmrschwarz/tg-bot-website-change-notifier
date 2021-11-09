@@ -1,15 +1,10 @@
 #!/usr/bin/python3
-from codecs import replace_errors
-from math import ceil
-from re import match, split
-from sqlite3 import dbapi2
 from textwrap import dedent, indent
-from urllib.parse import urldefrag, urlencode, urlparse, unquote_plus, unquote, urlunparse
+from urllib.parse import urldefrag, unquote_plus
 import requests
 import json
 import base64
 from enum import Enum
-import io
 import hashlib
 import datetime
 import threading
@@ -17,19 +12,15 @@ import imgkit  # pip3 install imgkit
 import time
 import random
 import sqlite3
-from PIL import Image
 import base64
 import math
 import os
 import sys
-from telegram import base
 from url_normalize import url_normalize  # pip3 install url_normalize
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
 # pip3 install selenium, apt install chromium-driver
 from selenium import webdriver
-import selenium
-from selenium.webdriver.common.keys import Keys as SeleniumKeys
 from selenium.webdriver.common.by import By as SeleniumLookupBy
 
 import telegram  # pip3 install python-telegram-bot
