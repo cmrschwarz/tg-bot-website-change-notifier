@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+from doctest import DONT_ACCEPT_TRUE_FOR_1
 from textwrap import dedent, indent
 from urllib.parse import urldefrag, unquote_plus
 import requests
@@ -15,6 +16,7 @@ import random
 import sqlite3
 import lxml.html  # pip3 install lxml
 import base64
+import signal
 import math
 import os
 import sys
@@ -30,6 +32,7 @@ from telegram import (MessageEntity, InlineKeyboardButton)
 from telegram.constants import MESSAGEENTITY_URL
 from telegram.ext import (Updater, CommandHandler, CallbackQueryHandler)
 from telegram.inline.inlinekeyboardmarkup import InlineKeyboardMarkup
+from telegram.utils.helpers import get_signal_name
 
 
 class UserState(Enum):
@@ -138,6 +141,9 @@ class Database:
         self.rollback = True
         self.release()
 
+    def close(self):
+        self.db.close()
+
 
 def log(level, text):
     global LOG_LEVEL
@@ -152,6 +158,7 @@ def log(level, text):
         # to canonicalize this we add a blank
         level_str = (level_str + " ")[0:len("[ERROR]")]
         sys.stdout.write(f"{level_str} {time_str}: {text}\n")
+        sys.stdout.flush()
 
 
 class SitePoller:
@@ -160,6 +167,7 @@ class SitePoller:
         global UPDATE_FREQUENCIES
         self.lock = threading.Lock()
         self.timer = None
+        self.shutdown = False
         self.delay_to_next = 0
         self.chrome_drivers = {}
         # if we used min instead of now(), on a restart all pages would
@@ -223,12 +231,16 @@ class SitePoller:
         self.timer = threading.Timer(
             self.delay_to_next, self.scheduled_poll_sites
         )
+        self.timer.setDaemon(True)
         self.timer.start()
         log(LogLevel.DEBUG,
             f"scheduled poll in {self.delay_to_next} seconds")
 
     def scheduled_poll_sites(self):
         self.lock.acquire()
+        if self.shutdown:
+            self.lock.release()
+            return
         assert(self.timer)
         self.timer = None
         try:
@@ -240,6 +252,9 @@ class SitePoller:
 
     def async_poll_sites(self):
         self.lock.acquire()
+        if self.shutdown:
+            self.lock.release()
+            return
         if self.timer:
             log(LogLevel.DEBUG, f"cancelled scheduled poll")
             self.timer.cancel()
@@ -252,6 +267,12 @@ class SitePoller:
             self.lock.release()
 
     def close(self):
+        self.shutdown = True
+        self.lock.acquire()
+        self.shutdown = True
+        self.timer.cancel()
+        self.timer = None
+        self.lock.release()
         self.thread_pool.shutdown(True)
         for cd in self.chrome_drivers.values():
             cd.close()
@@ -290,7 +311,8 @@ def get_site_png_selenium(url):
         options.add_argument('--headless')
         options.add_argument('--no-sandbox')
         options.add_argument("--incognito")
-        log(LogLevel.DEBUG, f"getting selenium driver (chromium) for tid: {tid}")
+        log(LogLevel.DEBUG,
+            f"getting selenium driver (chromium) for tid: {tid}")
         driver = webdriver.Chrome(options=options,
                                   executable_path=r'chromedriver')
         log(LogLevel.DEBUG, f"got selenium driver (chromium) for tid: {tid}")
@@ -1724,10 +1746,48 @@ def setup_site_poller():
     SITE_POLLER.async_poll_sites()
 
 
+def handle_signal(signum, frame):
+    global BOT
+    global SITE_POLLER
+    global EXIT_GATE
+    global EXIT_REQUESTED
+    sig_str = f"{signum} ({get_signal_name(signum)})"
+    if EXIT_REQUESTED:
+        log(
+            LogLevel.WARN,
+            f"Received second signal: {sig_str}, exiting immediately!"
+        )
+        os._exit(-1)
+
+    log(
+        LogLevel.INFO,
+        f"Received signal {sig_str}, exiting..."
+    )
+    EXIT_REQUESTED = True
+    EXIT_GATE.release()
+
+
 if __name__ == '__main__':
     setup_config()
     setup_db()
     setup_site_poller()
     setup_tg_bot()
-    BOT.idle()
+    # hack to work around BOT.idle() not exiting correctly
+    EXIT_REQUESTED = False
+    EXIT_GATE = threading.Semaphore(value=0)
+
+    sigset = [signal.SIGTERM, signal.SIGINT, signal.SIGABRT]
+    for sig in sigset:
+        signal.signal(sig, handle_signal)
+
+    EXIT_GATE.acquire()
+    # we close the site poller first since the telegram bot
+    # may take very long
     SITE_POLLER.close()
+    log(LogLevel.DEBUG, "site poller closed")
+    log(LogLevel.DEBUG, "telegram bot closing...")
+    BOT.stop()
+    log(LogLevel.DEBUG, "telegram bot closed")
+    DB.close()
+    log(LogLevel.DEBUG, "database closed")
+    sys.exit(0)
