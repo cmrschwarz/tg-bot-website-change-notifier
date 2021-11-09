@@ -19,6 +19,7 @@
     "default_screenshot_height": 1080,
     "max_screenshot_width": 1920,
     "max_screenshot_height": 4096,
-    "selenium_test_interval_seconds": 1,
+    "selenium_test_interval_seconds": 1.5,
+    "selenium_successive_tests": 3,
     "selenium_timeout_seconds": 10
 }

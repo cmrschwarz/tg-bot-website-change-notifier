@@ -9,6 +9,7 @@ import requests
 import json
 import base64
 from enum import Enum
+import io
 import hashlib
 import datetime
 import threading
@@ -16,9 +17,12 @@ import imgkit  # pip3 install imgkit
 import time
 import random
 import sqlite3
+from PIL import Image
+import base64
 import math
 import os
 import sys
+from telegram import base
 from url_normalize import url_normalize  # pip3 install url_normalize
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
@@ -264,6 +268,7 @@ def selenium_get_preferred_dimensions(driver):
 def get_site_png_selenium(url):
     global SITE_POLLER
     global SELENIUM_TEST_INTERVAL_SECONDS
+    global SELENIUM_SUCCESSIVE_TESTS
     global SELENIUM_TIMEOUT_SECONDS
     global DEFAULT_SCREENSHOT_WIDTH
     global DEFAULT_SCREENSHOT_HEIGHT
@@ -292,10 +297,12 @@ def get_site_png_selenium(url):
         SITE_POLLER.chrome_drivers[tid] = driver
     else:
         driver = SITE_POLLER.chrome_drivers[tid]
+
     driver.delete_all_cookies()
     start = datetime.datetime.now()
     log(LogLevel.DEBUG, f"getting: {url_to_get}")
     driver.get(url_to_get)
+    time.sleep(SELENIUM_TEST_INTERVAL_SECONDS)
     required_width_1, required_height_1 = selenium_get_preferred_dimensions(
         driver
     )
@@ -311,14 +318,21 @@ def get_site_png_selenium(url):
     png = None
     prev_png = None
     infiscroller = False
+    matches = 0
     while True:
         elements = driver.find_elements(by, value=search_string)
         if elements:
             log(LogLevel.DEBUG,
-                f"screenshotting ({width}x{height}, wanted {required_width_1, required_height_1}): {url_to_get}")
+                f"screenshotting ({width}x{height}, site preferred {required_width_1, required_height_1}): {url_to_get}")
             png = elements[0].screenshot_as_png
             if png == prev_png:
-                break
+                matches += 1
+                if matches == SELENIUM_SUCCESSIVE_TESTS:
+                    break
+            else:
+                matches = 0
+        else:
+            matches = 0
         if (datetime.datetime.now() - start).total_seconds() > SELENIUM_TIMEOUT_SECONDS:
             if elements:
                 log(LogLevel.INFO,
@@ -342,7 +356,7 @@ def get_site_png_selenium(url):
                     DEFAULT_SCREENSHOT_WIDTH,
                     DEFAULT_SCREENSHOT_HEIGHT,
                 )
-    return png
+    return png, hash_site_content(png)
 
 
 def get_site_png_imgkit(url):
@@ -352,11 +366,12 @@ def get_site_png_imgkit(url):
     with contextlib.redirect_stdout(STDIO_SUPPRESSION_FILE):
         content = imgkit.from_url(
             url, False, options={"--format": "png", "--disable-javascript": None})
-    return content
+    return content, hash_site_content(content)
 
 
 def get_site_html(url):
-    return requests.get(url).content
+    content = requests.get(url).content
+    return content, hash_site_content(content)
 
 
 class DiffMode(Enum):
@@ -418,11 +433,6 @@ def hash_site_content(content):
     digest = hashlib.sha512(content).digest()
     digest = base64.b64encode(digest).decode("ascii")
     return digest
-
-
-def get_site_hash(url, diff_mode):
-    content = extract_site(url, diff_mode)
-    return hash_site_content(content)
 
 
 def cutoff(txt, rem_len_needed=0, max_len=telegram.MAX_MESSAGE_LENGTH):
@@ -940,7 +950,7 @@ def cmd_add(update, context):
     site_added = False
     if not site_id:
         DB.release()
-        hash = get_site_hash(url, DEFAULT_DIFF_MODE)
+        _content, hash = extract_site(url, DEFAULT_DIFF_MODE)
         if not hash:
             reply_to_msg(
                 update.message, True,
@@ -1145,7 +1155,7 @@ def cmd_mode(update, context):
         return
 
     DB.release()
-    hash = get_site_hash(url, diff_mode)
+    _content, hash = extract_site(url, diff_mode)
     if not hash:
         reply_to_msg(
             update.message, True,
@@ -1343,8 +1353,7 @@ def cmd_preview(update, context):
                      f'sites is in {diff_mode.to_string()} mode which is not previewable')
         return
 
-    png = extract_site(url, diff_mode)
-    hash = hash_site_content(png)
+    png, hash = extract_site(url, diff_mode)
     if not png:
         reply_to_msg(update.message, True, f'failed to generate preview')
         return
@@ -1462,7 +1471,7 @@ def poll_site(site_id, url, mode, freq, old_hash):
     if new_hash:
         new_hash = new_hash[0]
     else:
-        new_hash = get_site_hash(url, mode)
+        _content, new_hash = extract_site(url, mode)
     if old_hash == new_hash:
         return
 
@@ -1627,6 +1636,11 @@ def setup_config():
     if "selenium_test_interval_seconds" in CONFIG:
         SELENIUM_TEST_INTERVAL_SECONDS = float(
             CONFIG["selenium_test_interval_seconds"])
+
+    global SELENIUM_SUCCESSIVE_TESTS
+    SELENIUM_SUCCESSIVE_TESTS = 3
+    if "selenium_successive_tests" in CONFIG:
+        SELENIUM_SUCCESSIVE_TESTS = int(CONFIG["selenium_successive_tests"])
 
     global SELENIUM_TIMEOUT_SECONDS
     SELENIUM_TIMEOUT_SECONDS = 10
