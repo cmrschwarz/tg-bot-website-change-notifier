@@ -7,11 +7,13 @@ import base64
 from enum import Enum
 import hashlib
 import datetime
+import io
 import threading
 import imgkit  # pip3 install imgkit
 import time
 import random
 import sqlite3
+import lxml.html
 import base64
 import math
 import os
@@ -52,6 +54,12 @@ class UserState(Enum):
         for dm in UserState:
             if dm.to_string() == s:
                 return dm
+
+
+class PreviewKind(Enum):
+    NONE = 0
+    HTML = 1
+    PNG = 2
 
 
 class LogLevel(Enum):
@@ -363,7 +371,7 @@ def get_site_png_selenium(url):
     return png, hash_site_content(png)
 
 
-def get_site_png_imgkit(url):
+def get_site_png_imgkit(url, xpath):
     global STDIO_SUPPRESSION_FILE
     # suppress uselesss 'Rendering...' etc. console output
     # from imgkit
@@ -374,14 +382,28 @@ def get_site_png_imgkit(url):
 
 
 def get_site_html(url):
-    content = requests.get(url).content
-    return content, hash_site_content(content)
+    url_to_get, xpath = urldefrag(url)
+    rq = requests.get(url_to_get)
+    content = str(rq.content, rq.encoding if rq.encoding else "utf-8")
+    if xpath:
+        xpath = unquote_plus(xpath)
+        doc = lxml.html.fromstring(content)
+        element = doc.find("." + xpath)
+        if element is not None:
+            hash_data = lxml.html.tostring(element)
+            content = str(hash_data, "utf-8")
+        else:
+            content = ""
+            hash_data = b""
+    else:
+        hash_data = content.encode("utf-8")
+    return content, hash_site_content(hash_data)
 
 
 class DiffMode(Enum):
-    HTML = (0, "html", get_site_html, False)
-    IMGKIT = (1, "imgkit", get_site_png_imgkit, True)
-    SELENIUM = (2, "selenium", get_site_png_selenium, True)
+    HTML = (0, "html", get_site_html, PreviewKind.HTML)
+    IMGKIT = (1, "imgkit", get_site_png_imgkit, PreviewKind.PNG)
+    SELENIUM = (2, "selenium", get_site_png_selenium, PreviewKind.PNG)
 
     def to_string(self):
         return self.value[1]
@@ -392,7 +414,7 @@ class DiffMode(Enum):
     def get_extractor(self):
         return self.value[2]
 
-    def is_previewable(self):
+    def preview_kind(self):
         return self.value[3]
 
     def from_int(i):
@@ -428,7 +450,7 @@ def extract_site(url, diff_mode):
                 prefix=" " * 4
             )
             )
-        return None
+        return None, None
 
 
 def hash_site_content(content):
@@ -670,13 +692,15 @@ def cmd_help(update, context):
             /frequency <id> <frequency>  change the update frequency for a site
 
         MODES:
-            selenium                     diff based on a selenium screenshot of the site,
+            selenium                     diff based on a selenium screenshot of the site {default_mode(DiffMode.SELENIUM)}
                                          url fragments starting with #/ are interpreted as an xpath to narrow
-                                         down the screenshot {default_mode(DiffMode.SELENIUM)}
+                                         down the screenshot
 
             imgkit                       diff based on an imgkit render of the site with js disabled {default_mode(DiffMode.IMGKIT)}
 
             html                         diff based on the raw html of the site {default_mode(DiffMode.HTML)}
+                                         url fragments starting with #/ are interpreted as an xpath to only
+                                         select a part of the full html document
 
         FREQUENCIES:
 
@@ -1359,24 +1383,31 @@ def cmd_preview(update, context):
 
     url, diff_mode = site_to_preview
     diff_mode = DiffMode.from_int(diff_mode)
-    if not diff_mode.is_previewable():
+    pk = diff_mode.preview_kind()
+    if pk == PreviewKind.NONE:
         reply_to_msg(update.message, True,
                      f'sites is in {diff_mode.to_string()} mode which is not previewable')
         return
 
-    png, hash = extract_site(url, diff_mode)
-    if not png:
+    content, hash = extract_site(url, diff_mode)
+    if not content:
         reply_to_msg(update.message, True, f'failed to generate preview')
         return
-    if png:
+
+    if pk == PreviewKind.HTML:
+        reply_to_msg(update.message, True, content, True)
+        reply_to_msg(update.message, False, f"hash: {hash}", True)
+    elif pk == PreviewKind.PNG:
         try:
             # imgkit sometimes produces size 0 pngs
             # we let telegram complain about those
             # maybe there is a better solution for this ?
-            update.message.reply_photo(png, caption=f"hash: {hash}")
+            update.message.reply_photo(content, caption=f"hash: {hash}")
         except telegram.error.BadRequest:
             reply_to_msg(update.message, True,
                          f'failed to post preview, the image is probably broken')
+    else:
+        assert False, "Unknown Preview Kind"
 
 
 def authorization_callback(update, cb_cmd, target_state, action_name):
