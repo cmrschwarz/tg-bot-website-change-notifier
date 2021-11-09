@@ -268,7 +268,7 @@ def selenium_get_preferred_dimensions(driver):
 def get_site_png_selenium(url):
     global SITE_POLLER
     global SELENIUM_TEST_INTERVAL_SECONDS
-    global SELENIUM_SUCCESSIVE_TESTS
+    global SELENIUM_TEST_REPETITIONS
     global SELENIUM_TIMEOUT_SECONDS
     global DEFAULT_SCREENSHOT_WIDTH
     global DEFAULT_SCREENSHOT_HEIGHT
@@ -340,7 +340,7 @@ def get_site_png_selenium(url):
             png = elements[0].screenshot_as_png
             if png == prev_png:
                 matches += 1
-                if matches == SELENIUM_SUCCESSIVE_TESTS:
+                if matches + 1 == SELENIUM_TEST_REPETITIONS:
                     break
             else:
                 matches = 0
@@ -1660,10 +1660,10 @@ def setup_config():
         SELENIUM_TEST_INTERVAL_SECONDS = float(
             CONFIG["selenium_test_interval_seconds"])
 
-    global SELENIUM_SUCCESSIVE_TESTS
-    SELENIUM_SUCCESSIVE_TESTS = 3
-    if "selenium_successive_tests" in CONFIG:
-        SELENIUM_SUCCESSIVE_TESTS = int(CONFIG["selenium_successive_tests"])
+    global SELENIUM_TEST_REPETITIONS
+    SELENIUM_TEST_REPETITIONS = 3
+    if "selenium_test_repetitions" in CONFIG:
+        SELENIUM_TEST_REPETITIONS = int(CONFIG["selenium_test_repetitions"])
 
     global SELENIUM_TIMEOUT_SECONDS
     SELENIUM_TIMEOUT_SECONDS = 10
