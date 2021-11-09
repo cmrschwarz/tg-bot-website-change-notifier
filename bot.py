@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 # pip3 install selenium, apt install chromium-driver
 from selenium import webdriver
 import selenium
-from selenium.webdriver import common
+from selenium.webdriver.common.keys import Keys as SeleniumKeys
 from selenium.webdriver.common.by import By as SeleniumLookupBy
 
 import telegram  # pip3 install python-telegram-bot
@@ -294,11 +294,24 @@ def get_site_png_selenium(url):
         driver = webdriver.Chrome(options=options,
                                   executable_path=r'chromedriver')
         driver.set_page_load_timeout(SELENIUM_TIMEOUT_SECONDS)
+        # add command for clearing the browser cache
+        driver.command_executor._commands['SEND_COMMAND'] = (
+            'POST', '/session/$sessionId/chromium/send_command'
+        )
         SITE_POLLER.chrome_drivers[tid] = driver
     else:
         driver = SITE_POLLER.chrome_drivers[tid]
 
     driver.delete_all_cookies()
+    # clear browser cache
+    # driver.execute(
+    #    'SEND_COMMAND',
+    #    {
+    #        'cmd': 'Network.clearBrowserCache',
+    #        'params': {}
+    #    }
+    # )
+    driver.set_window_size(DEFAULT_SCREENSHOT_WIDTH, DEFAULT_SCREENSHOT_HEIGHT)
     start = datetime.datetime.now()
     log(LogLevel.DEBUG, f"getting: {url_to_get}")
     driver.get(url_to_get)
@@ -309,7 +322,7 @@ def get_site_png_selenium(url):
     width = min(max(DEFAULT_SCREENSHOT_WIDTH, required_width_1),
                 MAX_SCREENSHOT_WIDTH)
     height = min(max(DEFAULT_SCREENSHOT_HEIGHT,
-                 required_height_1), MAX_SCREENSHOT_HEIGHT)
+                     required_height_1), MAX_SCREENSHOT_HEIGHT)
     driver.set_window_size(width, height)
     # changing the window size might change the preferences
     required_width_1, required_height_1 = selenium_get_preferred_dimensions(
@@ -323,7 +336,7 @@ def get_site_png_selenium(url):
         elements = driver.find_elements(by, value=search_string)
         if elements:
             log(LogLevel.DEBUG,
-                f"screenshotting ({width}x{height}, site preferred {required_width_1, required_height_1}): {url_to_get}")
+                f"screenshotting ({width}x{height}, site preferred {required_width_1}x{required_height_1}: {url_to_get}")
             png = elements[0].screenshot_as_png
             if png == prev_png:
                 matches += 1
@@ -345,8 +358,8 @@ def get_site_png_selenium(url):
         prev_png = png
         time.sleep(SELENIUM_TEST_INTERVAL_SECONDS)
         if not infiscroller:
-            required_width_2, required_height_2 = \
-                selenium_get_preferred_dimensions(driver)
+            required_width_2, required_height_2 = selenium_get_preferred_dimensions(
+                driver)
 
             if required_width_2 != required_width_1 or required_height_2 != required_height_1:
                 infiscroller = True
@@ -665,10 +678,10 @@ def cmd_help(update, context):
             /frequency <id> <frequency>  change the update frequency for a site
 
         MODES:
-            selenium                     diff based on a selenium screenshot of the site, 
+            selenium                     diff based on a selenium screenshot of the site,
                                          url fragments starting with #/ are interpreted as an xpath to narrow
                                          down the screenshot {default_mode(DiffMode.SELENIUM)}
-                                         
+
             imgkit                       diff based on an imgkit render of the site with js disabled {default_mode(DiffMode.IMGKIT)}
 
             html                         diff based on the raw html of the site {default_mode(DiffMode.HTML)}
