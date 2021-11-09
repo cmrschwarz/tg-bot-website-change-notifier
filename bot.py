@@ -13,7 +13,7 @@ import imgkit  # pip3 install imgkit
 import time
 import random
 import sqlite3
-import lxml.html
+import lxml.html  # pip3 install lxml
 import base64
 import math
 import os
@@ -21,7 +21,7 @@ import sys
 from url_normalize import url_normalize  # pip3 install url_normalize
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
-# pip3 install selenium, apt install chromium-driver
+# pip3 install selenium; apt install chromium-driver
 from selenium import webdriver
 from selenium.webdriver.common.by import By as SeleniumLookupBy
 
@@ -290,8 +290,10 @@ def get_site_png_selenium(url):
         options.add_argument('--headless')
         options.add_argument('--no-sandbox')
         options.add_argument("--incognito")
+        log(LogLevel.DEBUG, f"getting selenium driver (chromium) for tid: {tid}")
         driver = webdriver.Chrome(options=options,
                                   executable_path=r'chromedriver')
+        log(LogLevel.DEBUG, f"got selenium driver (chromium) for tid: {tid}")
         driver.set_page_load_timeout(SELENIUM_TIMEOUT_SECONDS)
         # add command for clearing the browser cache
         driver.command_executor._commands['SEND_COMMAND'] = (
@@ -1149,8 +1151,8 @@ def cmd_mode(update, context):
     args = update.message.text
     assert(args[0:len(cmd)] == cmd)
     args = args[len(cmd):].strip()
-    id_str = args.split()[0]
     try:
+        id_str = args.split()[0]
         site_id = int(id_str)
     except Exception as ex:
         reply_to_msg(update.message, True,
@@ -1242,8 +1244,8 @@ def cmd_frequency(update, context):
     args = update.message.text
     assert(args[0:len(cmd)] == cmd)
     args = args[len(cmd):].strip()
-    id_str = args.split()[0]
     try:
+        id_str = args.split()[0]
         site_id = int(id_str)
     except Exception as ex:
         reply_to_msg(update.message, True,
@@ -1359,8 +1361,8 @@ def cmd_preview(update, context):
     args = update.message.text
     assert(args[0:len(cmd)] == cmd)
     args = args[len(cmd):].strip()
-    id_str = args.split()[0]
     try:
+        id_str = args.split()[0]
         site_id = int(id_str)
     except Exception as ex:
         reply_to_msg(update.message, True,
