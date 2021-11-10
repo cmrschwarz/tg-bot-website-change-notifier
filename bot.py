@@ -386,6 +386,7 @@ def get_site_png_selenium(url):
 
             if required_width_2 != required_width_1 or required_height_2 != required_height_1:
                 infiscroller = True
+                matches = 0
                 log(LogLevel.DEBUG,
                     f"selenium detected an infiniscroller: {url}")
                 driver.set_window_size(
