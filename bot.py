@@ -521,10 +521,10 @@ def extract_site(url, diff_mode):
     log(LogLevel.DEBUG,
         f"accessing site in {diff_mode.to_string()} mode: {url}")
     try:
-        result = diff_mode.get_extractor()(url)
+        content, hash = diff_mode.get_extractor()(url)
         log(LogLevel.INFO,
             f"successfully loaded site in {diff_mode.to_string()} mode: {url}")
-        return result
+        return content, hash
     except Exception as ex:
         err_msg = str(ex)
         log(LogLevel.ERROR, f"failed to load '{url}':\n"
@@ -542,7 +542,7 @@ def extract_site(url, diff_mode):
 
 
 def hash_site_content(content):
-    if not content:
+    if content is None:
         return None
     digest = hashlib.sha512(content).digest()
     digest = base64.b64encode(digest).decode("ascii")
@@ -1238,6 +1238,7 @@ def cmd_mode(update, context):
     assert(args[0:len(cmd)] == cmd)
     args = args[len(cmd):].strip()
     try:
+        id_str = ""  # in case the next assignment fails
         id_str = args.split()[0]
         site_id = int(id_str)
     except Exception as ex:
@@ -1331,6 +1332,7 @@ def cmd_frequency(update, context):
     assert(args[0:len(cmd)] == cmd)
     args = args[len(cmd):].strip()
     try:
+        id_str = ""  # in case the next assignment fails
         id_str = args.split()[0]
         site_id = int(id_str)
     except Exception as ex:
@@ -1448,6 +1450,7 @@ def cmd_preview(update, context):
     assert(args[0:len(cmd)] == cmd)
     args = args[len(cmd):].strip()
     try:
+        id_str = ""  # in case the next assignment fails
         id_str = args.split()[0]
         site_id = int(id_str)
     except Exception as ex:
@@ -1478,9 +1481,12 @@ def cmd_preview(update, context):
         return
 
     content, hash = extract_site(url, diff_mode)
-    if not content:
+    if content is None:
         reply_to_msg(update.message, True, f'failed to generate preview')
         return
+
+    if content == "":
+        content = "<empty response>"
 
     if pk == PreviewKind.HTML:
         reply_to_msg(update.message, True, content, True)
