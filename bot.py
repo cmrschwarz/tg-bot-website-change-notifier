@@ -771,8 +771,8 @@ def cmd_help(update, context):
     text = f"""\
         COMMANDS:
             /help                        print this menu
-            /list                        list all currently tracked sites and their ids
-            /listdec                     list all currently tracked sites (url decoded) and their ids
+            /list                        list all currently tracked sites (url decoded) and their ids
+            /listlinks                   list all currently tracked sites and their ids with clickable links
             /preview <id>                render the site like it would be during diff generation
             /add <url>                   add a new site to track
             /remove <id>                 remove a site
@@ -916,7 +916,7 @@ def cmd_siteinfo(update, context):
     reply_to_msg(update.message, True, "not implemented yet :/")
 
 
-def cmd_list(update, context, urldecode=False):
+def cmd_list(update, context, urldecode=True):
     uid = get_user_id(update.message)
     if not uid:
         return
@@ -1633,8 +1633,8 @@ def setup_tg_bot():
     dp.add_handler(CommandHandler('start', cmd_start))
     dp.add_handler(CommandHandler('help', cmd_help))
     dp.add_handler(CommandHandler('list', cmd_list))
-    dp.add_handler(CommandHandler('listdec', lambda update,
-                   context: cmd_list(update, context, urldecode=True)))
+    dp.add_handler(CommandHandler('listlinks', lambda update,
+                   context: cmd_list(update, context, urldecode=False)))
     dp.add_handler(CommandHandler('add', cmd_add))
     dp.add_handler(CommandHandler('remove', cmd_remove))
     dp.add_handler(CommandHandler('mode', cmd_mode))
