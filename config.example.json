@@ -6,7 +6,6 @@
     "max_sites_per_user": 5,
     "default_diff_mode": "html",
     "max_url_len": -1,
-    "num_worker_threads": 16,
     "update_frequencies_seconds": {
         "daily": 86400,
         "hourly": 3600,
@@ -15,6 +14,8 @@
     },
     "default_update_frequency": "hourly",
     "log_level": "warn",
+    "num_worker_threads": 4,
+    "selenium_num_drivers": 2,
     "default_screenshot_width": 720,
     "default_screenshot_height": 1080,
     "max_screenshot_width": 1920,

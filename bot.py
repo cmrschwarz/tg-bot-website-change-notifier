@@ -165,20 +165,57 @@ class SitePoller:
     def __init__(self):
         global NUM_WORKER_THREADS
         global UPDATE_FREQUENCIES
+        global SELENIUM_NUM_DRIVERS
+        global SELENIUM_TIMEOUT_SECONDS
         self.lock = threading.Lock()
         self.timer = None
         self.shutdown = False
         self.delay_to_next = 0
-        self.chrome_drivers = {}
+        self.chrome_drivers = []
+        self.driver_lock = threading.BoundedSemaphore(
+            value=SELENIUM_NUM_DRIVERS)
         # if we used min instead of now(), on a restart all pages would
         # be polled immediately, potentially causing lots of load
         # this way we ease in using the normal frequency + seed distribution
         self.last_poll = datetime.datetime.now()
         self.timestep = lcm(*UPDATE_FREQUENCIES.values())
+        assert(self.timestep < INT_MAX)
         self.smallest_frequency = min(UPDATE_FREQUENCIES.values())
         self.last_seed = 0
         self.thread_pool = ThreadPoolExecutor(NUM_WORKER_THREADS)
-        assert(self.timestep < INT_MAX)
+        driver_gate = threading.Semaphore(value=0)
+        self.thread_pool.submit(self.create_drivers, driver_gate)
+        driver_creation_timeout = SELENIUM_TIMEOUT_SECONDS * SELENIUM_NUM_DRIVERS
+        if not driver_gate.acquire(blocking=True, timeout=driver_creation_timeout):
+            log(LogLevel.ERROR, "Failed to connect to chrome drivers")
+            self.thread_pool.shutdown(False)
+            os._exit(-1)
+
+    def create_drivers(self, driver_gate):
+        global SELENIUM_NUM_DRIVERS
+        global SELENIUM_TIMEOUT_SECONDS
+        options = webdriver.ChromeOptions()
+        options.add_argument('--headless')
+        options.add_argument('--no-sandbox')
+        options.add_argument("--incognito")
+        log(LogLevel.DEBUG,
+            f"aquiring {SELENIUM_NUM_DRIVERS} selenium (chromium) driver{'s' if SELENIUM_NUM_DRIVERS > 1 else ''}...")
+        for i in range(SELENIUM_NUM_DRIVERS):
+            driver = webdriver.Chrome(
+                options=options,
+                executable_path='chromedriver'
+            )
+            log(LogLevel.DEBUG,
+                f"got {i+1} selenium driver{'s' if i > 0 else ''}")
+            driver.set_page_load_timeout(SELENIUM_TIMEOUT_SECONDS)
+            # add command for clearing the browser cache
+            driver.command_executor._commands['SEND_COMMAND'] = (
+                'POST', '/session/$sessionId/chromium/send_command'
+            )
+            self.lock.acquire()
+            self.chrome_drivers.append(driver)
+            self.lock.release()
+        driver_gate.release()
 
     def poll_sites_raw(self):
         global CONFIG
@@ -274,8 +311,31 @@ class SitePoller:
         self.timer = None
         self.lock.release()
         self.thread_pool.shutdown(True)
-        for cd in self.chrome_drivers.values():
-            cd.close()
+        for cd in self.chrome_drivers:
+            # hack: this sometimes throws weird exceptions :/
+            # resource release should never fail as far as we're concerned
+            try:
+                cd.close()
+            except:
+                pass
+
+    def aquire_driver(self):
+        self.driver_lock.acquire()
+        if self.shutdown:
+            self.lock.release()
+            return
+        self.lock.acquire()
+        self.chrome_drivers.pop()
+        self.lock.release()
+
+    def release_driver(self, driver):
+        self.lock.acquire()
+        if self.shutdown:
+            self.lock.release()
+            return
+        self.chrome_drivers.append(driver)
+        self.lock.release()
+        self.driver_lock.release()
 
 
 def selenium_get_preferred_dimensions(driver):
@@ -305,94 +365,79 @@ def get_site_png_selenium(url):
             search_string = fragment
             url_to_get = url_defrag
 
-    tid = threading.current_thread().ident
-    if tid not in SITE_POLLER.chrome_drivers:
-        options = webdriver.ChromeOptions()
-        options.add_argument('--headless')
-        options.add_argument('--no-sandbox')
-        options.add_argument("--incognito")
-        log(LogLevel.DEBUG,
-            f"getting selenium driver (chromium) for tid: {tid}")
-        driver = webdriver.Chrome(options=options,
-                                  executable_path=r'chromedriver')
-        log(LogLevel.DEBUG, f"got selenium driver (chromium) for tid: {tid}")
-        driver.set_page_load_timeout(SELENIUM_TIMEOUT_SECONDS)
-        # add command for clearing the browser cache
-        driver.command_executor._commands['SEND_COMMAND'] = (
-            'POST', '/session/$sessionId/chromium/send_command'
-        )
-        SITE_POLLER.chrome_drivers[tid] = driver
-    else:
-        driver = SITE_POLLER.chrome_drivers[tid]
-
-    driver.delete_all_cookies()
-    # clear browser cache
-    # driver.execute(
-    #    'SEND_COMMAND',
-    #    {
-    #        'cmd': 'Network.clearBrowserCache',
-    #        'params': {}
-    #    }
-    # )
-    driver.set_window_size(DEFAULT_SCREENSHOT_WIDTH, DEFAULT_SCREENSHOT_HEIGHT)
-    start = datetime.datetime.now()
-    log(LogLevel.DEBUG, f"getting: {url_to_get}")
-    driver.get(url_to_get)
-    time.sleep(SELENIUM_TEST_INTERVAL_SECONDS)
-    required_width_1, required_height_1 = selenium_get_preferred_dimensions(
-        driver
-    )
-    width = min(max(DEFAULT_SCREENSHOT_WIDTH, required_width_1),
-                MAX_SCREENSHOT_WIDTH)
-    height = min(max(DEFAULT_SCREENSHOT_HEIGHT,
-                     required_height_1), MAX_SCREENSHOT_HEIGHT)
-    driver.set_window_size(width, height)
-    # changing the window size might change the preferences
-    required_width_1, required_height_1 = selenium_get_preferred_dimensions(
-        driver
-    )
-    png = None
-    prev_png = None
-    infiscroller = False
-    matches = 0
-    while True:
-        elements = driver.find_elements(by, value=search_string)
-        if elements:
-            log(LogLevel.DEBUG,
-                f"screenshotting ({width}x{height}, site preferred {required_width_1}x{required_height_1}: {url_to_get}")
-            png = elements[0].screenshot_as_png
-            if png == prev_png:
-                matches += 1
-                if matches + 1 == SELENIUM_TEST_REPETITIONS:
-                    break
-            else:
-                matches = 0
-        else:
-            matches = 0
-        if (datetime.datetime.now() - start).total_seconds() > SELENIUM_TIMEOUT_SECONDS:
-            if elements:
-                log(LogLevel.INFO,
-                    f"selenium reached timeout before the screenshot stabilized: {url}"
-                    )
-            else:
-                log(LogLevel.INFO,
-                    f"selenium did not find selector target: {url}")
-            break
-        prev_png = png
+    driver = SITE_POLLER.aquire_driver()
+    try:
+        driver.delete_all_cookies()
+        # clear browser cache
+        # driver.execute(
+        #    'SEND_COMMAND',
+        #    {
+        #        'cmd': 'Network.clearBrowserCache',
+        #        'params': {}
+        #    }
+        # )
+        driver.set_window_size(DEFAULT_SCREENSHOT_WIDTH,
+                               DEFAULT_SCREENSHOT_HEIGHT)
+        start = datetime.datetime.now()
+        log(LogLevel.DEBUG, f"getting: {url_to_get}")
+        driver.get(url_to_get)
         time.sleep(SELENIUM_TEST_INTERVAL_SECONDS)
-        if not infiscroller:
-            required_width_2, required_height_2 = selenium_get_preferred_dimensions(
-                driver)
-
-            if required_width_2 != required_width_1 or required_height_2 != required_height_1:
-                infiscroller = True
-                matches = 0
+        required_width_1, required_height_1 = selenium_get_preferred_dimensions(
+            driver
+        )
+        width = min(max(DEFAULT_SCREENSHOT_WIDTH, required_width_1),
+                    MAX_SCREENSHOT_WIDTH)
+        height = min(max(DEFAULT_SCREENSHOT_HEIGHT,
+                         required_height_1), MAX_SCREENSHOT_HEIGHT)
+        driver.set_window_size(width, height)
+        # changing the window size might change the preferences
+        required_width_1, required_height_1 = selenium_get_preferred_dimensions(
+            driver
+        )
+        png = None
+        prev_png = None
+        infiscroller = False
+        matches = 0
+        while True:
+            elements = driver.find_elements(by, value=search_string)
+            if elements:
                 log(LogLevel.DEBUG,
-                    f"selenium detected an infiniscroller: {url}")
-                driver.set_window_size(
-                    DEFAULT_SCREENSHOT_WIDTH,
-                    DEFAULT_SCREENSHOT_HEIGHT,
-                )
+                    f"screenshotting ({width}x{height}, site preferred {required_width_1}x{required_height_1}: {url_to_get}")
+                png = elements[0].screenshot_as_png
+                if png == prev_png:
+                    matches += 1
+                    if matches + 1 == SELENIUM_TEST_REPETITIONS:
+                        break
+                else:
+                    matches = 0
+            else:
+                matches = 0
+            if (datetime.datetime.now() - start).total_seconds() > SELENIUM_TIMEOUT_SECONDS:
+                if elements:
+                    log(LogLevel.INFO,
+                        f"selenium reached timeout before the screenshot stabilized: {url}"
+                        )
+                else:
+                    log(LogLevel.INFO,
+                        f"selenium did not find selector target: {url}")
+                break
+            prev_png = png
+            time.sleep(SELENIUM_TEST_INTERVAL_SECONDS)
+            if not infiscroller:
+                required_width_2, required_height_2 = selenium_get_preferred_dimensions(
+                    driver)
+
+                if required_width_2 != required_width_1 or required_height_2 != required_height_1:
+                    infiscroller = True
+                    matches = 0
+                    log(LogLevel.DEBUG,
+                        f"selenium detected an infiniscroller: {url}")
+                    driver.set_window_size(
+                        DEFAULT_SCREENSHOT_WIDTH,
+                        DEFAULT_SCREENSHOT_HEIGHT,
+                    )
+    finally:
+        SITE_POLLER.release_driver(driver)
     return png, hash_site_content(png)
 
 
@@ -1707,6 +1752,11 @@ def setup_config():
         SELENIUM_TEST_INTERVAL_SECONDS = float(
             CONFIG["selenium_test_interval_seconds"])
 
+    global SELENIUM_NUM_DRIVERS
+    SELENIUM_NUM_DRIVERS = 3
+    if "selenium_num_drivers" in CONFIG:
+        SELENIUM_NUM_DRIVERS = int(CONFIG["selenium_num_drivers"])
+
     global SELENIUM_TEST_REPETITIONS
     SELENIUM_TEST_REPETITIONS = 3
     if "selenium_test_repetitions" in CONFIG:
@@ -1744,7 +1794,6 @@ def setup_config():
 def setup_site_poller():
     global SITE_POLLER
     SITE_POLLER = SitePoller()
-    SITE_POLLER.async_poll_sites()
 
 
 def handle_signal(signum, frame):
@@ -1770,8 +1819,8 @@ def handle_signal(signum, frame):
 
 if __name__ == '__main__':
     setup_config()
-    setup_db()
     setup_site_poller()
+    setup_db()
     setup_tg_bot()
     # hack to work around BOT.idle() not exiting correctly
     EXIT_REQUESTED = False
@@ -1781,7 +1830,11 @@ if __name__ == '__main__':
     for sig in sigset:
         signal.signal(sig, handle_signal)
 
+    # do one initial poll
+    SITE_POLLER.async_poll_sites()
+
     EXIT_GATE.acquire()
+
     # we close the site poller first since the telegram bot
     # may take very long
     SITE_POLLER.close()
