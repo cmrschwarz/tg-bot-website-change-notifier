@@ -363,6 +363,7 @@ def get_site_png_selenium(url):
     global MAX_SCREENSHOT_HEIGHT
     url_to_get = url
     by = SeleniumLookupBy.TAG_NAME
+    have_xpath = False
     search_string = "body"
     url_defrag, fragment = urldefrag(url)
     if fragment:
@@ -371,6 +372,7 @@ def get_site_png_selenium(url):
             by = SeleniumLookupBy.XPATH
             search_string = fragment
             url_to_get = url_defrag
+            have_xpath = True
 
     driver = SITE_POLLER.aquire_driver()
     try:
@@ -410,7 +412,16 @@ def get_site_png_selenium(url):
             if elements:
                 log(LogLevel.DEBUG,
                     f"screenshotting ({width}x{height}, site preferred {required_width_1}x{required_height_1}: {url_to_get}")
-                png = elements[0].screenshot_as_png
+                e = elements[0]
+                # if the body has a height or width of 0 we fallback to screenshotting
+                # the full page
+                if not have_xpath and e.rect["width"] == 0 or e.rect["height"] == 0:
+                    png = driver.get_screenshot_as_png()
+                else:
+                    # todo: maybe find a way to disable the other elements
+                    # and screenshot the full page if the size is 0 but
+                    # we have an xpath ?
+                    png = elements[0].screenshot_as_png
                 if png == prev_png:
                     matches += 1
                     if matches + 1 == SELENIUM_TEST_REPETITIONS:
@@ -1034,7 +1045,7 @@ def cmd_add(update, context):
         assert(url[0:4] == cmd)
         url = url[len(cmd):].strip()
         url_decoded = unquote_plus(url)
-        url = url_normalize(url_decoded)
+        url = url_normalize(url_decoded, sort_query_params=False)
         if len(url) > MAX_URL_LEN:
             reply_to_msg(update.message, True,
                          f'url is too long (limit is set to {MAX_URL_LEN}), refusing to track')
