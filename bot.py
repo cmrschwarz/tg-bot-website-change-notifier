@@ -188,7 +188,6 @@ class SitePoller:
         driver_creation_timeout = SELENIUM_TIMEOUT_SECONDS * SELENIUM_NUM_DRIVERS
         if not driver_gate.acquire(blocking=True, timeout=driver_creation_timeout):
             log(LogLevel.ERROR, "Failed to connect to chrome drivers")
-            self.thread_pool.shutdown(False)
             self.lock.acquire()
             self.close_chrome_drivers()
             os._exit(-1)
@@ -1852,4 +1851,5 @@ if __name__ == '__main__':
     log(LogLevel.DEBUG, "telegram bot closed")
     DB.close()
     log(LogLevel.DEBUG, "database closed")
+    log(LogLevel.INFO, "freed resources, exiting gracefully")
     sys.exit(0)
