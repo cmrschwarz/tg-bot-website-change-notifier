@@ -189,6 +189,8 @@ class SitePoller:
         if not driver_gate.acquire(blocking=True, timeout=driver_creation_timeout):
             log(LogLevel.ERROR, "Failed to connect to chrome drivers")
             self.thread_pool.shutdown(False)
+            self.lock.acquire()
+            self.close_chrome_drivers()
             os._exit(-1)
 
     def create_drivers(self, driver_gate):
@@ -198,7 +200,7 @@ class SitePoller:
         options.add_argument('--headless')
         options.add_argument('--no-sandbox')
         options.add_argument("--incognito")
-        log(LogLevel.DEBUG,
+        log(LogLevel.INFO,
             f"aquiring {SELENIUM_NUM_DRIVERS} selenium (chromium) driver{'s' if SELENIUM_NUM_DRIVERS > 1 else ''}...")
         for i in range(SELENIUM_NUM_DRIVERS):
             driver = webdriver.Chrome(
@@ -215,6 +217,8 @@ class SitePoller:
             self.lock.acquire()
             self.chrome_drivers.append(driver)
             self.lock.release()
+        log(LogLevel.INFO,
+            f"{SELENIUM_NUM_DRIVERS} selenium driver{'s' if SELENIUM_NUM_DRIVERS > 1 else ''} aquired")
         driver_gate.release()
 
     def poll_sites_raw(self):
@@ -303,14 +307,7 @@ class SitePoller:
         finally:
             self.lock.release()
 
-    def close(self):
-        self.shutdown = True
-        self.lock.acquire()
-        self.shutdown = True
-        self.timer.cancel()
-        self.timer = None
-        self.lock.release()
-        self.thread_pool.shutdown(True)
+    def close_chrome_drivers(self):
         for cd in self.chrome_drivers:
             # hack: this sometimes throws weird exceptions :/
             # resource release should never fail as far as we're concerned
@@ -319,14 +316,25 @@ class SitePoller:
             except:
                 pass
 
+    def close(self, abort=False):
+        self.shutdown = True
+        self.lock.acquire()
+        self.shutdown = True
+        self.timer.cancel()
+        self.timer = None
+        self.lock.release()
+        self.thread_pool.shutdown(True)
+        self.close_chrome_drivers()
+
     def aquire_driver(self):
         self.driver_lock.acquire()
+        self.lock.acquire()
         if self.shutdown:
             self.lock.release()
             return
-        self.lock.acquire()
-        self.chrome_drivers.pop()
+        driver = self.chrome_drivers.pop()
         self.lock.release()
+        return driver
 
     def release_driver(self, driver):
         self.lock.acquire()
