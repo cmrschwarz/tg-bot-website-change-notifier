@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-from doctest import DONT_ACCEPT_TRUE_FOR_1
 from textwrap import dedent, indent
 from urllib.parse import urldefrag, unquote_plus
 import requests
@@ -472,19 +471,32 @@ def get_site_png_imgkit(url, xpath):
 def get_site_html(url):
     url_to_get, xpath = urldefrag(url)
     rq = requests.get(url_to_get)
-    content = str(rq.content, rq.encoding if rq.encoding else "utf-8")
+    enc = rq.encoding if rq.encoding else "utf-8"
     if xpath:
         xpath = unquote_plus(xpath)
-        doc = lxml.html.fromstring(content)
-        element = doc.find("." + xpath)
-        if element is not None:
-            hash_data = lxml.html.tostring(element)
-            content = str(hash_data, "utf-8")
-        else:
-            content = ""
-            hash_data = b""
+        try:
+            doc = lxml.html.fromstring(
+                rq.content, parser=lxml.html.HTMLParser(encoding=enc))
+        except Exception:
+            try:
+                # fallback to latin1 which has no invalid sequences
+                enc = "latin1"
+                doc = lxml.html.fromstring(
+                    rq.content, parser=lxml.html.HTMLParser(encoding=enc))
+            except Exception:
+                return "", hash_site_content(b"")
+        element = doc.xpath(xpath)
+        content = ""
+        hash_data = b""
+        for e in element:
+            if type(e) == lxml.etree._ElementUnicodeResult:
+                content += str(e)
+            else:
+                content += lxml.html.tostring(e, encoding="unicode")
+        hash_data = content.encode(enc)
     else:
-        hash_data = content.encode("utf-8")
+        content = str(rq.content, enc)
+        hash_data = content.encode(enc)
     return content, hash_site_content(hash_data)
 
 
@@ -1445,6 +1457,7 @@ def cmd_preview(update, context):
     global DB
     global SITE_POLLER
     global UPDATE_FREQUENCIES
+    global LENGTH_REQUIRED
     cmd = "/preview"
     args = update.message.text
     assert(args[0:len(cmd)] == cmd)
@@ -1489,7 +1502,7 @@ def cmd_preview(update, context):
         content = "<empty response>"
 
     if pk == PreviewKind.HTML:
-        reply_to_msg(update.message, True, content, True)
+        reply_to_msg(update.message, True, cutoff(content), True)
         reply_to_msg(update.message, False, f"hash: {hash}", True)
     elif pk == PreviewKind.PNG:
         try:
